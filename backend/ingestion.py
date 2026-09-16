@@ -5,67 +5,76 @@ from io import BytesIO
 from typing import Any
 
 import pandas as pd
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
-from schemas import ClientInput, FarmInput
+from schemas import ClientInput, FarmInput, SegmentLocalPrice, StationInput
 
 FARM_SHEET = "Farms"
 CLIENT_SHEET = "Clients"
+STATION_SHEET = "Station"
 HEADER_SCAN_ROWS = 20
 
 FARM_COLUMNS = (
     "farm_id",
-    "expected_capacity",
-    "actual_a",
-    "actual_b",
-    "actual_c",
-    "actual_d",
-    "mix_a",
-    "mix_b",
-    "mix_c",
-    "mix_d",
+    "expected_daily_capacity",
+    "expected_A_pct",
+    "expected_B_pct",
+    "expected_C_pct",
+    "expected_D_pct",
+    "actual_A",
+    "actual_B",
+    "actual_C",
+    "actual_D",
 )
-CLIENT_COLUMNS = ("client_id", "rule", "demand", "reference_price")
+CLIENT_COLUMNS = (
+    "client_id",
+    "acceptance_mode",
+    "demand",
+    "export_price_per_eur",
+)
+STATION_COLUMNS = (
+    "station_id",
+    "export_conditioning_capacity",
+    "local_market_ratio",
+)
+SEGMENT_PRICE_COLUMNS = ("segment", "reference_export_price_per_eur")
 
+# Compact lowercase keys (no underscores) -> Excel-aligned JSON field names.
+# Quantity `_t` suffixes are stripped; price `_per_t_` becomes `_per_`.
 COLUMN_ALIASES = {
     "farmid": "farm_id",
     "farmname": "farm_name",
-    "expectedcapacity": "expected_capacity",
-    "expecteddailycapacity": "expected_capacity",
-    "expecteddailycapacityt": "expected_capacity",
-    "capacity": "expected_capacity",
-    "actuala": "actual_a",
-    "actualat": "actual_a",
-    "actualb": "actual_b",
-    "actualbt": "actual_b",
-    "actualc": "actual_c",
-    "actualct": "actual_c",
-    "actuald": "actual_d",
-    "actualdt": "actual_d",
-    "mixa": "mix_a",
-    "expecteda": "mix_a",
-    "expectedapct": "mix_a",
-    "mixb": "mix_b",
-    "expectedb": "mix_b",
-    "expectedbpct": "mix_b",
-    "mixc": "mix_c",
-    "expectedc": "mix_c",
-    "expectedcpct": "mix_c",
-    "mixd": "mix_d",
-    "expectedd": "mix_d",
-    "expecteddpct": "mix_d",
+    "expecteddailycapacity": "expected_daily_capacity",
+    "expecteddailycapacityt": "expected_daily_capacity",
+    "expectedapct": "expected_A_pct",
+    "expectedbpct": "expected_B_pct",
+    "expectedcpct": "expected_C_pct",
+    "expecteddpct": "expected_D_pct",
+    "actuala": "actual_A",
+    "actualat": "actual_A",
+    "actualb": "actual_B",
+    "actualbt": "actual_B",
+    "actualc": "actual_C",
+    "actualct": "actual_C",
+    "actuald": "actual_D",
+    "actualdt": "actual_D",
     "clientid": "client_id",
     "clientname": "client_name",
-    "rule": "rule",
-    "acceptancemode": "rule",
+    "acceptancemode": "acceptance_mode",
     "requestedsegment": "requested_segment",
     "demand": "demand",
     "demandt": "demand",
-    "referenceprice": "reference_price",
-    "price": "reference_price",
-    "exportpricepert": "reference_price",
-    "exportpriceperteur": "reference_price",
-    "exportpricepertteur": "reference_price",
+    "exportpriceperteur": "export_price_per_eur",
+    "exportpricepert": "export_price_per_eur",
+    "exportpricepereur": "export_price_per_eur",
+    "stationid": "station_id",
+    "exportconditioningcapacity": "export_conditioning_capacity",
+    "exportconditioningcapacityt": "export_conditioning_capacity",
+    "localmarketratio": "local_market_ratio",
+    "segment": "segment",
+    "referenceexportpriceperteur": "reference_export_price_per_eur",
+    "referenceexportpricepert": "reference_export_price_per_eur",
+    "referenceexportpricepereur": "reference_export_price_per_eur",
 }
 
 
@@ -75,7 +84,9 @@ class IngestionError(Exception):
         super().__init__(message)
 
 
-def ingest_plan_workbook(content: bytes) -> tuple[list[FarmInput], list[ClientInput]]:
+def ingest_plan_workbook(
+    content: bytes,
+) -> tuple[list[FarmInput], list[ClientInput], StationInput]:
     try:
         workbook = pd.ExcelFile(BytesIO(content), engine="openpyxl")
     except Exception as exc:
@@ -83,17 +94,21 @@ def ingest_plan_workbook(content: bytes) -> tuple[list[FarmInput], list[ClientIn
 
     farms_sheet = _find_sheet(workbook, FARM_SHEET, FARM_COLUMNS)
     clients_sheet = _find_sheet(workbook, CLIENT_SHEET, CLIENT_COLUMNS)
-    if farms_sheet == clients_sheet:
+    station_sheet = _find_sheet(workbook, STATION_SHEET, STATION_COLUMNS)
+
+    used = {farms_sheet, clients_sheet, station_sheet}
+    if len(used) < 3:
         raise IngestionError(
-            "Farms and Clients data cannot be read from the same sheet."
+            "Farms, Clients, and Station data must come from distinct sheets."
         )
 
     farms_df = _read_sheet(workbook, farms_sheet, FARM_COLUMNS, FarmInput)
     clients_df = _read_sheet(workbook, clients_sheet, CLIENT_COLUMNS, ClientInput)
+    station = _read_station(workbook, station_sheet)
 
     farms = _validate_records(farms_df, FarmInput, entity="farm")
     clients = _validate_records(clients_df, ClientInput, entity="client")
-    return farms, clients
+    return farms, clients, station
 
 
 def _find_sheet(
@@ -139,7 +154,7 @@ def _find_sheet(
 
     raise IngestionError(
         f"Could not find a '{expected}' sheet. "
-        "Sheet order does not matter; the workbook must contain Farms and Clients sheets."
+        "Sheet order does not matter; the workbook must contain Farms, Clients, and Station sheets."
     )
 
 
@@ -166,7 +181,7 @@ def _read_sheet(
     workbook: pd.ExcelFile,
     sheet_name: str,
     required_columns: tuple[str, ...],
-    model: type[FarmInput] | type[ClientInput],
+    model: type[BaseModel],
 ) -> pd.DataFrame:
     raw = pd.read_excel(workbook, sheet_name=sheet_name, header=None)
     if raw.empty:
@@ -197,6 +212,94 @@ def _read_sheet(
     return frame.where(pd.notna(frame), None)
 
 
+def _read_station(workbook: pd.ExcelFile, sheet_name: str) -> StationInput:
+    raw = pd.read_excel(workbook, sheet_name=sheet_name, header=None)
+    if raw.empty:
+        raise IngestionError(f"Sheet '{sheet_name}' is empty.")
+
+    station_header_idx = _find_header_row(raw, STATION_COLUMNS)
+    if station_header_idx is None:
+        missing = ", ".join(STATION_COLUMNS)
+        raise IngestionError(
+            f"Sheet '{sheet_name}' is missing required columns: {missing}."
+        )
+
+    station_columns = [
+        _canonical_column(value) for value in raw.iloc[station_header_idx].tolist()
+    ]
+    station_frame = raw.iloc[station_header_idx + 1 :].copy()
+    station_frame.columns = station_columns
+    station_frame = station_frame.loc[:, ~pd.Index(station_frame.columns).duplicated()]
+    keep = [name for name in STATION_COLUMNS if name in station_frame.columns]
+    station_frame = station_frame.loc[:, keep].dropna(how="all")
+    station_frame = station_frame.where(pd.notna(station_frame), None)
+
+    if station_frame.empty:
+        raise IngestionError(f"Sheet '{sheet_name}' contains no station data rows.")
+
+    station_record: dict[str, Any] | None = None
+    for record in station_frame.to_dict(orient="records"):
+        if all(record.get(column) not in (None, "") for column in STATION_COLUMNS):
+            station_record = record
+            break
+    if station_record is None:
+        raise IngestionError(
+            f"Sheet '{sheet_name}' does not contain a complete station row."
+        )
+
+    segment_prices = _read_segment_prices(raw)
+
+    try:
+        return StationInput.model_validate(
+            {**station_record, "segment_prices": segment_prices}
+        )
+    except ValidationError as exc:
+        raise IngestionError(
+            _format_validation_error(
+                entity="station",
+                row_number=1,
+                record=station_record,
+                exc=exc,
+            )
+        ) from exc
+
+
+def _read_segment_prices(raw: pd.DataFrame) -> list[dict[str, Any]]:
+    header_idx = _find_header_row(raw, SEGMENT_PRICE_COLUMNS)
+    if header_idx is None:
+        return []
+
+    columns = [_canonical_column(value) for value in raw.iloc[header_idx].tolist()]
+    frame = raw.iloc[header_idx + 1 :].copy()
+    frame.columns = columns
+    frame = frame.loc[:, ~pd.Index(frame.columns).duplicated()]
+    keep = [name for name in SEGMENT_PRICE_COLUMNS if name in frame.columns]
+    frame = frame.loc[:, keep].dropna(how="all")
+    frame = frame.where(pd.notna(frame), None)
+
+    prices: list[dict[str, Any]] = []
+    for record in frame.to_dict(orient="records"):
+        if all(record.get(column) not in (None, "") for column in SEGMENT_PRICE_COLUMNS):
+            prices.append(record)
+        else:
+            break
+
+    validated: list[dict[str, Any]] = []
+    for index, record in enumerate(prices, start=1):
+        try:
+            validated.append(SegmentLocalPrice.model_validate(record).model_dump())
+        except ValidationError as exc:
+            raise IngestionError(
+                _format_validation_error(
+                    entity="segment price",
+                    row_number=index,
+                    record=record,
+                    exc=exc,
+                )
+            ) from exc
+    return validated
+
+
 def _find_header_row(raw: pd.DataFrame, required_columns: tuple[str, ...]) -> int | None:
     required = set(required_columns)
     scan_limit = min(HEADER_SCAN_ROWS, len(raw))
@@ -211,10 +314,14 @@ def _canonical_column(value: object) -> str:
     normalized = str(value).strip().lower()
     normalized = re.sub(r"[\s\-]+", "_", normalized)
     normalized = re.sub(r"_+", "_", normalized).strip("_")
+    # Quantity in tonnes: drop trailing _t. Price-per-tonne: _per_t_ -> _per_.
+    normalized = normalized.replace("_per_t_", "_per_")
+    if normalized.endswith("_t"):
+        normalized = normalized[:-2]
     compact = normalized.replace("_", "")
     if compact in COLUMN_ALIASES:
         return COLUMN_ALIASES[compact]
-    for suffix in ("teur", "eur", "pct", "t"):
+    for suffix in ("eur", "pct"):
         if compact.endswith(suffix) and compact != suffix:
             stripped = compact[: -len(suffix)]
             if stripped in COLUMN_ALIASES:
@@ -252,8 +359,13 @@ def _format_validation_error(
     record: dict[str, Any],
     exc: ValidationError,
 ) -> str:
-    identity_key = "farm_id" if entity == "farm" else "client_id"
-    identity = record.get(identity_key)
+    identity_key = {
+        "farm": "farm_id",
+        "client": "client_id",
+        "station": "station_id",
+        "segment price": "segment",
+    }.get(entity)
+    identity = record.get(identity_key) if identity_key else None
     if identity in (None, ""):
         prefix = f"Validation failed for {entity} at row {row_number}"
     else:

@@ -14,15 +14,15 @@ class FarmInput(BaseModel):
 
     farm_id: str = Field(min_length=1)
     farm_name: str | None = None
-    expected_capacity: NonNegativeFloat
-    actual_a: NonNegativeFloat
-    actual_b: NonNegativeFloat
-    actual_c: NonNegativeFloat
-    actual_d: NonNegativeFloat
-    mix_a: NonNegativeFloat
-    mix_b: NonNegativeFloat
-    mix_c: NonNegativeFloat
-    mix_d: NonNegativeFloat
+    expected_daily_capacity: NonNegativeFloat
+    expected_A_pct: NonNegativeFloat
+    expected_B_pct: NonNegativeFloat
+    expected_C_pct: NonNegativeFloat
+    expected_D_pct: NonNegativeFloat
+    actual_A: NonNegativeFloat
+    actual_B: NonNegativeFloat
+    actual_C: NonNegativeFloat
+    actual_D: NonNegativeFloat
 
     @field_validator("farm_id", mode="before")
     @classmethod
@@ -35,15 +35,15 @@ class FarmInput(BaseModel):
         return _coerce_optional_text(value)
 
     @field_validator(
-        "expected_capacity",
-        "actual_a",
-        "actual_b",
-        "actual_c",
-        "actual_d",
-        "mix_a",
-        "mix_b",
-        "mix_c",
-        "mix_d",
+        "expected_daily_capacity",
+        "expected_A_pct",
+        "expected_B_pct",
+        "expected_C_pct",
+        "expected_D_pct",
+        "actual_A",
+        "actual_B",
+        "actual_C",
+        "actual_D",
     )
     @classmethod
     def reject_negative(cls, value: float, info: ValidationInfo) -> float:
@@ -51,10 +51,16 @@ class FarmInput(BaseModel):
 
     @model_validator(mode="after")
     def mixes_must_sum_to_one(self) -> FarmInput:
-        total = self.mix_a + self.mix_b + self.mix_c + self.mix_d
+        total = (
+            self.expected_A_pct
+            + self.expected_B_pct
+            + self.expected_C_pct
+            + self.expected_D_pct
+        )
         if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=MIX_SUM_TOLERANCE):
             raise ValueError(
-                f"mix_a, mix_b, mix_c, and mix_d must exactly equal 1.0 (got {total})"
+                "expected_A_pct, expected_B_pct, expected_C_pct, and expected_D_pct "
+                f"must exactly equal 1.0 (got {total})"
             )
         return self
 
@@ -64,19 +70,19 @@ class ClientInput(BaseModel):
 
     client_id: str = Field(min_length=1)
     client_name: str | None = None
-    rule: str = Field(min_length=1)
+    acceptance_mode: str = Field(min_length=1)
     requested_segment: str | None = None
     demand: NonNegativeFloat
-    reference_price: NonNegativeFloat
+    export_price_per_eur: NonNegativeFloat
 
     @field_validator("client_id", mode="before")
     @classmethod
     def coerce_client_id(cls, value: object) -> object:
         return _coerce_identifier(value)
 
-    @field_validator("rule", mode="before")
+    @field_validator("acceptance_mode", mode="before")
     @classmethod
-    def coerce_rule(cls, value: object) -> object:
+    def coerce_acceptance_mode(cls, value: object) -> object:
         if value is None:
             return value
         return str(value).strip()
@@ -86,16 +92,105 @@ class ClientInput(BaseModel):
     def coerce_optional_text(cls, value: object) -> object:
         return _coerce_optional_text(value)
 
-    @field_validator("demand", "reference_price")
+    @field_validator("demand", "export_price_per_eur")
     @classmethod
     def reject_negative(cls, value: float, info: ValidationInfo) -> float:
         return _reject_negative(value, info)
+
+
+class SegmentLocalPrice(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    segment: str = Field(min_length=1)
+    reference_export_price_per_eur: NonNegativeFloat
+
+    @field_validator("segment", mode="before")
+    @classmethod
+    def coerce_segment(cls, value: object) -> object:
+        return _coerce_optional_text(value) or value
+
+    @field_validator("reference_export_price_per_eur")
+    @classmethod
+    def reject_negative(cls, value: float, info: ValidationInfo) -> float:
+        return _reject_negative(value, info)
+
+
+class StationInput(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    station_id: str = Field(min_length=1)
+    export_conditioning_capacity: NonNegativeFloat
+    local_market_ratio: NonNegativeFloat
+    segment_prices: list[SegmentLocalPrice] = Field(default_factory=list)
+
+    @field_validator("station_id", mode="before")
+    @classmethod
+    def coerce_station_id(cls, value: object) -> object:
+        return _coerce_identifier(value)
+
+    @field_validator("export_conditioning_capacity", "local_market_ratio")
+    @classmethod
+    def reject_negative(cls, value: float, info: ValidationInfo) -> float:
+        return _reject_negative(value, info)
+
+    @field_validator("local_market_ratio")
+    @classmethod
+    def ratio_must_be_at_most_one(cls, value: float) -> float:
+        if value > 1.0:
+            raise ValueError("local_market_ratio cannot be greater than 1.0")
+        return value
 
 
 class PlanIngestResponse(BaseModel):
     filename: str | None
     farms: list[FarmInput]
     clients: list[ClientInput]
+    station: StationInput
+
+
+class PlanKpis(BaseModel):
+    total_exported_t: float
+    export_rate_pct: float
+    total_export_revenue_eur: float
+    total_local_residual_t: float
+    total_local_revenue_eur: float
+
+
+class ProductionViewRow(BaseModel):
+    farm_id: str
+    farm_name: str | None = None
+    expected_daily_capacity: float
+    actual_delivered: float
+    local_residual_t: float
+    variance_t: float
+
+
+class CommercialViewRow(BaseModel):
+    client_id: str
+    client_name: str | None = None
+    acceptance_mode: str
+    requested_segment: str
+    demand: float
+    export_price_per_eur: float
+    allocated_t: float
+    status: str
+    shortage_reason: str | None = None
+
+
+class TraceabilityLedgerRow(BaseModel):
+    farm_id: str
+    segment: str
+    client_id: str
+    tonnes_allocated: float
+    export_revenue_eur: float
+
+
+class PlanResultResponse(BaseModel):
+    filename: str | None = None
+    kpis: PlanKpis
+    production_view: list[ProductionViewRow]
+    commercial_view: list[CommercialViewRow]
+    traceability_ledger: list[TraceabilityLedgerRow]
 
 
 def _coerce_identifier(value: object) -> object:
