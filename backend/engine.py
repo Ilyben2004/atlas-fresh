@@ -176,6 +176,10 @@ def calculate_plan(
                 "farm_name": farm.get("farm_name"),
                 "expected_daily_capacity": _round_t(expected),
                 "actual_delivered": _round_t(actual_delivered),
+                "actual_A": _round_t(float(farm.get("actual_A", 0) or 0)),
+                "actual_B": _round_t(float(farm.get("actual_B", 0) or 0)),
+                "actual_C": _round_t(float(farm.get("actual_C", 0) or 0)),
+                "actual_D": _round_t(float(farm.get("actual_D", 0) or 0)),
                 "local_residual_t": _round_t(local_residual_t),
                 "variance_t": _round_t(actual_delivered - expected),
             }
@@ -187,17 +191,31 @@ def calculate_plan(
         else 0.0
     )
 
+    # Group ledger by farm so operators can audit each orchard block.
+    ledger_sorted = sorted(
+        ledger,
+        key=lambda row: (
+            str(row.get("farm_id", "")),
+            str(row.get("segment", "")),
+            str(row.get("client_id", "")),
+        ),
+    )
+
     return {
         "kpis": {
             "total_exported_t": _round_t(total_exported_t),
+            "export_capacity_t": _round_t(export_capacity),
             "export_rate_pct": _round_pct(export_rate_pct),
             "total_export_revenue_eur": _round_money(total_export_revenue_eur),
             "total_local_residual_t": _round_t(total_local_residual_t),
             "total_local_revenue_eur": _round_money(total_local_revenue_eur),
+            "total_actual_received_t": _round_t(total_actual_received_t),
+            "farm_count": len(farm_rows),
+            "client_count": len(client_rows),
         },
         "production_view": production_view,
         "commercial_view": commercial_view,
-        "traceability_ledger": ledger,
+        "traceability_ledger": ledger_sorted,
     }
 
 

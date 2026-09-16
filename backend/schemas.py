@@ -150,10 +150,14 @@ class PlanIngestResponse(BaseModel):
 
 class PlanKpis(BaseModel):
     total_exported_t: float
+    export_capacity_t: float
     export_rate_pct: float
     total_export_revenue_eur: float
     total_local_residual_t: float
     total_local_revenue_eur: float
+    total_actual_received_t: float
+    farm_count: int
+    client_count: int
 
 
 class ProductionViewRow(BaseModel):
@@ -161,6 +165,10 @@ class ProductionViewRow(BaseModel):
     farm_name: str | None = None
     expected_daily_capacity: float
     actual_delivered: float
+    actual_A: float = 0
+    actual_B: float = 0
+    actual_C: float = 0
+    actual_D: float = 0
     local_residual_t: float
     variance_t: float
 
