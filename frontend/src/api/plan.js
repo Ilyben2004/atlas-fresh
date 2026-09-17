@@ -69,4 +69,18 @@ export async function askPlanAssistant(question, context, tool = null) {
   return payload;
 }
 
+export async function computePlanFromInputs(inputs) {
+  const response = await fetch(`${API_BASE}/api/v1/plan/json`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(inputs),
+  });
+
+  const payload = await readJson(response);
+  if (!response.ok) {
+    throw new Error(detailMessage(payload, `Plan failed (${response.status})`));
+  }
+  return payload;
+}
+
 export { API_BASE };

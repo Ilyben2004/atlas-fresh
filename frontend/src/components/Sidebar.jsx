@@ -10,6 +10,12 @@ const NAV = [
     icon: "analytics",
   },
   {
+    id: "inputs",
+    label: "Inputs",
+    hint: "Edit sheets",
+    icon: "edit_note",
+  },
+  {
     id: "production",
     label: "Production",
     hint: "Farm variances",
@@ -40,11 +46,13 @@ export default function Sidebar({
   activeView,
   onNavigate,
   plan,
+  hasInputs = false,
 }) {
   const [approveOpen, setApproveOpen] = useState(false);
 
   const counts = {
     overview: plan ? "Ready" : "Idle",
+    inputs: hasInputs ? "Edit" : "Idle",
     production: plan?.production_view?.length ?? 0,
     commercial: plan?.commercial_view?.length ?? 0,
     ledger: plan?.traceability_ledger?.length ?? 0,

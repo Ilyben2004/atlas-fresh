@@ -1,5 +1,4 @@
-import { useMemo } from "react";
-import { formatEuro, formatNumber, formatPct, formatTonnes, Icon, Metric } from "../utils/format.jsx";
+import { formatEuro, formatNumber, formatPct, Icon, Metric } from "../utils/format.jsx";
 import OverviewCharts from "./OverviewCharts.jsx";
 
 function KpiCard({ children, className = "" }) {
@@ -8,102 +7,6 @@ function KpiCard({ children, className = "" }) {
       className={`arch-card arch-card-hover flex min-h-[168px] flex-col justify-between rounded-xl p-5 transition-all ${className}`}
     >
       {children}
-    </div>
-  );
-}
-
-function DecisionBridge({ plan }) {
-  const atRisk = useMemo(
-    () =>
-      (plan?.commercial_view || []).filter(
-        (row) => row.status === "PARTIAL" || row.status === "UNSERVED",
-      ),
-    [plan],
-  );
-  const shortFarms = useMemo(
-    () =>
-      [...(plan?.production_view || [])]
-        .filter((row) => (row.variance_t ?? 0) < -1e-9)
-        .sort((a, b) => a.variance_t - b.variance_t)
-        .slice(0, 3),
-    [plan],
-  );
-  const ledger = plan?.traceability_ledger || [];
-
-  if (!plan?.kpis || (!atRisk.length && !shortFarms.length)) return null;
-
-  return (
-    <div className="arch-card rounded-xl p-5">
-      <div className="flex flex-wrap items-center gap-2">
-        <Icon name="hub" className="text-[20px] text-[#546500]" />
-        <h2 className="font-display text-lg font-bold text-ink">
-          Production ↔ Commercial link
-        </h2>
-      </div>
-      <p className="mt-1 text-sm text-muted-soft">
-        How farm shortfalls relate to clients still waiting for fruit.
-      </p>
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
-        <div>
-          <div className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted">
-            Biggest farm shortfalls
-          </div>
-          <ul className="mt-2 space-y-1.5 text-sm text-ink">
-            {shortFarms.length === 0 ? (
-              <li className="text-muted-soft">No farms are short of expected volume.</li>
-            ) : (
-              shortFarms.map((row) => (
-                <li key={row.farm_id} className="flex justify-between gap-2">
-                  <span>
-                    <span className="font-mono font-semibold">{row.farm_id}</span>{" "}
-                    {row.farm_name || ""}
-                  </span>
-                  <span className="font-mono text-[12px] font-semibold text-[#991b1b]">
-                    {formatNumber(row.variance_t)} t
-                  </span>
-                </li>
-              ))
-            )}
-          </ul>
-        </div>
-        <div>
-          <div className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted">
-            At-risk clients
-          </div>
-          <ul className="mt-2 space-y-1.5 text-sm text-ink">
-            {atRisk.length === 0 ? (
-              <li className="text-muted-soft">Every client is fully served.</li>
-            ) : (
-              atRisk.map((row) => {
-                const sources = [
-                  ...new Set(
-                    ledger
-                      .filter((entry) => entry.client_id === row.client_id)
-                      .map((entry) => `${entry.farm_id}:${entry.segment}`),
-                  ),
-                ].slice(0, 3);
-                return (
-                  <li key={row.client_id}>
-                    <div className="flex justify-between gap-2">
-                      <span>
-                        <span className="font-mono font-semibold">{row.client_id}</span>{" "}
-                        needs {row.requested_segment} · short{" "}
-                        {formatTonnes(row.remaining_t ?? row.demand - row.allocated_t)}
-                      </span>
-                      <span className="font-mono text-[11px] text-muted">{row.status}</span>
-                    </div>
-                    <div className="mt-0.5 font-mono text-[11px] text-muted">
-                      {sources.length
-                        ? `Fed by ${sources.join(", ")}`
-                        : "No compatible export allocated yet"}
-                    </div>
-                  </li>
-                );
-              })
-            )}
-          </ul>
-        </div>
-      </div>
     </div>
   );
 }
@@ -285,7 +188,6 @@ export default function KpiGrid({ plan, updatedAt }) {
           </div>
         </div>
 
-        <DecisionBridge plan={plan} />
         <OverviewCharts plan={plan} />
       </div>
     </section>

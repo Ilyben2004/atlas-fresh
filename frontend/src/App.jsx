@@ -1,26 +1,60 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { checkHealth, uploadPlan } from "./api/plan";
+import { checkHealth, computePlanFromInputs, uploadPlan } from "./api/plan";
 import AiPlanAssistant from "./components/AiPlanAssistant";
 import CommercialTable from "./components/CommercialTable";
 import Header from "./components/Header";
+import InputsEditor, { cloneInputs } from "./components/InputsEditor";
 import KpiGrid from "./components/KpiGrid";
 import LedgerTable from "./components/LedgerTable";
 import ProductionTable from "./components/ProductionTable";
 import Sidebar, { NAV } from "./components/Sidebar";
 import { Icon } from "./utils/format.jsx";
-import { loadPlanSession, savePlanSession } from "./utils/planStorage";
+import {
+  inputsAreEqual,
+  loadPlanSession,
+  savePlanSession,
+} from "./utils/planStorage";
 
 const savedSession = loadPlanSession();
+
+function stampNow() {
+  return new Date().toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+}
 
 export default function App() {
   const fileRef = useRef(null);
   const [plan, setPlan] = useState(savedSession?.plan ?? null);
   const [uploading, setUploading] = useState(false);
+  const [planning, setPlanning] = useState(false);
   const [error, setError] = useState(null);
+  const [inputsError, setInputsError] = useState(null);
   const [live, setLive] = useState(false);
   const [updatedAt, setUpdatedAt] = useState(savedSession?.updatedAt ?? null);
   const [activeView, setActiveView] = useState(savedSession?.activeView ?? "overview");
   const [sidebarOpen, setSidebarOpen] = useState(savedSession?.sidebarOpen ?? true);
+  const [draftInputs, setDraftInputs] = useState(() =>
+    savedSession?.draftInputs
+      ? cloneInputs(savedSession.draftInputs)
+      : savedSession?.plan?.inputs
+        ? cloneInputs(savedSession.plan.inputs)
+        : null,
+  );
+  const [savedInputs, setSavedInputs] = useState(() =>
+    savedSession?.savedInputs
+      ? cloneInputs(savedSession.savedInputs)
+      : savedSession?.plan?.inputs
+        ? cloneInputs(savedSession.plan.inputs)
+        : null,
+  );
+
+  const dirty = useMemo(
+    () => !inputsAreEqual(draftInputs, savedInputs),
+    [draftInputs, savedInputs],
+  );
 
   const activeLabel = useMemo(
     () => NAV.find((item) => item.id === activeView)?.label || "Overview",
@@ -42,8 +76,15 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    savePlanSession({ plan, updatedAt, activeView, sidebarOpen });
-  }, [plan, updatedAt, activeView, sidebarOpen]);
+    savePlanSession({
+      plan,
+      updatedAt,
+      activeView,
+      sidebarOpen,
+      savedInputs,
+      draftInputs,
+    });
+  }, [plan, updatedAt, activeView, sidebarOpen, savedInputs, draftInputs]);
 
   async function handleFileChange(event) {
     const file = event.target.files?.[0];
@@ -52,14 +93,14 @@ export default function App() {
 
     setUploading(true);
     setError(null);
+    setInputsError(null);
     try {
       const result = await uploadPlan(file);
-      const stamp = new Date().toLocaleTimeString("en-GB", {
-        hour: "2-digit",
-        minute: "2-digit",
-        timeZoneName: "short",
-      });
+      const stamp = stampNow();
+      const inputs = result.inputs ? cloneInputs(result.inputs) : null;
       setPlan(result);
+      setDraftInputs(inputs);
+      setSavedInputs(inputs ? cloneInputs(inputs) : null);
       setUpdatedAt(stamp);
       setLive(true);
       setActiveView("overview");
@@ -69,6 +110,35 @@ export default function App() {
       setUploading(false);
     }
   }
+
+  function handleSaveInputs() {
+    if (!draftInputs) return;
+    setSavedInputs(cloneInputs(draftInputs));
+    setInputsError(null);
+  }
+
+  async function handlePlanFromInputs() {
+    if (!savedInputs || dirty) return;
+    setPlanning(true);
+    setInputsError(null);
+    setError(null);
+    try {
+      const result = await computePlanFromInputs(savedInputs);
+      const inputs = result.inputs ? cloneInputs(result.inputs) : cloneInputs(savedInputs);
+      setPlan(result);
+      setDraftInputs(inputs);
+      setSavedInputs(cloneInputs(inputs));
+      setUpdatedAt(stampNow());
+      setLive(true);
+      setActiveView("overview");
+    } catch (err) {
+      setInputsError(err.message || "Plan failed");
+    } finally {
+      setPlanning(false);
+    }
+  }
+
+  const showWorkspace = Boolean(plan) || Boolean(draftInputs);
 
   return (
     <div className="app-shell antialiased">
@@ -96,6 +166,7 @@ export default function App() {
           activeView={activeView}
           onNavigate={setActiveView}
           plan={plan}
+          hasInputs={Boolean(draftInputs || savedInputs || plan?.inputs)}
         />
 
         <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-canvas p-3 md:p-4">
@@ -109,7 +180,7 @@ export default function App() {
             </div>
           ) : null}
 
-          {!plan ? (
+          {!showWorkspace ? (
             <div className="arch-card flex h-full min-h-0 flex-col items-center justify-center gap-4 rounded-xl px-6 text-center">
               <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-chip-bg text-accent">
                 <Icon name="upload_file" className="text-[28px]" />
@@ -119,8 +190,8 @@ export default function App() {
                   Upload production commercial data
                 </h2>
                 <p className="mt-2 max-w-xl text-sm text-muted-soft">
-                  Load the Excel workbook with Farms, Clients, and Station sheets. Use the
-                  sidebar to switch between Overview, Production, Commercial, and Ledger.
+                  Load the Excel workbook with Farms, Clients, and Station sheets. Then edit
+                  Inputs, Save, and Plan again from the sidebar.
                 </p>
               </div>
               <button
@@ -136,7 +207,25 @@ export default function App() {
           ) : (
             <div className="flex h-full min-h-0 flex-col">
               {activeView === "overview" ? (
-                <KpiGrid plan={plan} updatedAt={updatedAt} />
+                plan ? (
+                  <KpiGrid plan={plan} updatedAt={updatedAt} />
+                ) : (
+                  <div className="arch-card flex h-full items-center justify-center rounded-xl p-6 text-sm text-muted-soft">
+                    Save Inputs and click Plan to compute Overview KPIs.
+                  </div>
+                )
+              ) : null}
+              {activeView === "inputs" ? (
+                <InputsEditor
+                  draftInputs={draftInputs}
+                  savedInputs={savedInputs}
+                  dirty={dirty}
+                  planning={planning}
+                  error={inputsError}
+                  onChangeDraft={setDraftInputs}
+                  onSave={handleSaveInputs}
+                  onPlan={handlePlanFromInputs}
+                />
               ) : null}
               {activeView === "production" ? <ProductionTable plan={plan} /> : null}
               {activeView === "commercial" ? <CommercialTable plan={plan} /> : null}

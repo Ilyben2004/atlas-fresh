@@ -244,6 +244,31 @@ class PlanIngestResponse(BaseModel):
     station: StationInput
 
 
+class PlanInputs(BaseModel):
+    """Editable Farms / Clients / Station payload for JSON replan."""
+
+    farms: list[FarmInput] = Field(min_length=1)
+    clients: list[ClientInput] = Field(min_length=1)
+    station: StationInput
+
+    @model_validator(mode="after")
+    def reject_duplicate_ids(self) -> PlanInputs:
+        farm_ids = [row.farm_id for row in self.farms]
+        client_ids = [row.client_id for row in self.clients]
+        dup_farms = sorted({value for value in farm_ids if farm_ids.count(value) > 1})
+        dup_clients = sorted(
+            {value for value in client_ids if client_ids.count(value) > 1}
+        )
+        errors: list[str] = []
+        if dup_farms:
+            errors.append("duplicate farm IDs: " + ", ".join(dup_farms))
+        if dup_clients:
+            errors.append("duplicate client IDs: " + ", ".join(dup_clients))
+        if errors:
+            raise ValueError("; ".join(errors))
+        return self
+
+
 class PlanKpis(BaseModel):
     total_expected_t: float = 0
     total_exported_t: float
@@ -309,6 +334,7 @@ class PlanResultResponse(BaseModel):
     production_view: list[ProductionViewRow]
     commercial_view: list[CommercialViewRow]
     traceability_ledger: list[TraceabilityLedgerRow]
+    inputs: PlanInputs | None = None
 
 
 def _coerce_identifier(value: object) -> object:

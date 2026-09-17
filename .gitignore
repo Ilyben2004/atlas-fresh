@@ -1,6 +1,17 @@
 # Local test data
 dataTest/
 
+# Assignment brief / local design references (not part of the app)
+Qarizmi_Atlas Fresh_Weekend_Technical_Assessment.pdf
+*.pdf
+design_insperation/
+design_inspiration/
+
+# Accidental pip / local pytest installs
+backend/=*
+backend/.pytest_pkgs/
+.pytest_pkgs/
+
 # Byte-compiled / cache
 __pycache__/
 *.py[cod]
