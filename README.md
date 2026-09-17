@@ -1,11 +1,11 @@
 # Atlas Fresh
 
-Daily apple export allocation dashboard: upload a Farms / Clients / Station Excel workbook, run the allocation engine, and review Overview, Production, Commercial, and Ledger views. An optional AI Plan Assistant answers three approved plan questions via Gemini.
+Daily apple export allocation dashboard: upload a Farms / Clients / Station Excel workbook, run the allocation engine, and review Overview, Production, Commercial, Ledger, and editable Inputs. An optional AI Plan Assistant answers three approved plan questions via Gemini when a key is set.
 
 ## Prerequisites
 
 - Docker and Docker Compose
-- An Excel workbook with **Farms**, **Clients**, and **Station** sheets
+- An Excel workbook with **Farms**, **Clients**, and **Station** sheets (baseline workbook used during development)
 
 ## Run with Docker
 
@@ -13,7 +13,7 @@ Daily apple export allocation dashboard: upload a Farms / Clients / Station Exce
 # 1. Environment (optional AI key)
 cp .env.example .env
 # Edit .env and set GEMINI_API_KEY if you want the live AI assistant.
-# Leave GEMINI_API_KEY empty to disable the AI assistant (a clear error is shown).
+# Leave GEMINI_API_KEY empty for no-key mode (labelled deterministic KPI summary).
 
 # 2. Build and start
 docker compose up --build
@@ -43,11 +43,11 @@ docker compose up -d
 
 ## Environment variables
 
-Copy `.env.example` to `.env` in the repo root:
+Copy `.env.example` to `.env` in the repo root. **Do not commit `.env` or API keys.**
 
 | Variable         | Purpose                                      | Default              |
 |------------------|----------------------------------------------|----------------------|
-| `GEMINI_API_KEY` | Google Gemini API key for the Plan Assistant | empty (assistant disabled) |
+| `GEMINI_API_KEY` | Google Gemini API key for the Plan Assistant | empty (no-key mode)  |
 | `GEMINI_MODEL`   | Gemini model name                            | `gemini-3.6-flash`   |
 
 ## Using the app
@@ -56,7 +56,7 @@ Copy `.env.example` to `.env` in the repo root:
 2. Upload an Excel workbook (Farms + Clients + Station)  
 3. Browse Overview, Production, Commercial, Ledger  
 4. Optionally edit sheets under **Inputs**, then **Save** and **Plan**  
-5. Open AI Plan Assistant and pick one of the three approved questions  
+5. Open AI Plan Assistant: with a key, Gemini answers the three approved questions from plan data; without a key, a labelled deterministic summary is shown  
 
 ## Tests
 
@@ -73,17 +73,81 @@ docker compose up -d backend
 docker compose exec backend python -m pytest -q
 ```
 
-## AI tools and time spent
+Coverage includes allocation policy, validation constraints, JSON replan, and assistant boundaries (grounded IDs, unsupported reject, provider failure, no-key).
+
+## Architecture
+
+```
+Excel / Inputs editor
+        │
+        ▼
+FastAPI (validation → greedy allocation engine → KPIs / views / ledger)
+        │
+        ├── REST: POST /api/v1/plan (Excel), POST /api/v1/plan/json (edited inputs)
+        └── REST: POST /api/v1/chat (Gemini tool data + LLM answer when keyed)
+        │
+        ▼
+React SPA (Overview, Inputs, Production, Commercial, Ledger, AI Assistant)
+```
+
+- **Planning is deterministic and server-side** (price order, EXACT/MINIMUM, 5 t steps, station cap, local residual). The LLM never reallocates.
+- **Frontend** is a Vite + React SPA; **backend** is FastAPI + pandas/openpyxl for Excel ingest.
+
+## Assumptions
+
+- One station, one day, apples only; workbook sheets Farms / Clients / Station are authoritative.
+- Actual tonnes and demand are multiples of 5 t; segment mixes sum to 1.0.
+- Higher export price is served first; ties break on `client_id`.
+- Compatible supply prefers smallest quality upgrade, then `farm_id`.
+- Unexported fruit goes local at `local_market_ratio ×` segment reference price.
+- Paid APIs are optional; core product runs without Gemini.
+
+## Limitations
+
+- No auth, DB, multi-day optimizer, logistics, or live deployment in this delivery.
+- Inputs editor is in-browser draft + JSON replan (no server-side draft persistence).
+- Assistant is limited to three analytical intents; off-topic questions are rejected.
+- Without `GEMINI_API_KEY`, there is no live LLM answer (honest no-key + deterministic summary only).
+
+## Next three production steps
+
+1. Persist plans and inputs (DB) with audit trail and role-based access.  
+2. CI pipeline (tests + image build) and a staging deploy behind config secrets.  
+3. Stronger assistant grounding (answer schema validation, eval set on baseline workbook) and observability for Gemini failures.
+
+## Walkthrough video
+
+3–5 minute demo for Production / Commercial users (upload → plan → views → Inputs replan → assistant).
+
+> Add the Loom / YouTube unlisted URL here before sending the submission email.
+
+## AI tools, verification, time spent, intentional omissions
 
 | Tool | Role |
 |------|------|
-| **Stitch by Google** | AI design tool used for frontend visual design |
-| **Cursor** | Coding assistant used while implementing and testing |
+| **Stitch by Google** | AI design tool for frontend visual direction |
+| **Cursor** | Coding assistant for implementation and testing |
+| **Gemini** | Hosted model for the Plan Assistant (when keyed) |
+
+**What was verified**
+
+- Baseline-style KPIs and shortage behaviour on the sample workbook  
+- Engine rules: ordering, EXACT/MINIMUM, capacity, local residual, quality upgrade  
+- Validation rejections (mix, 5 t multiples, modes, segments, prices, duplicates)  
+- Assistant: grounded IDs, reject / provider failure, no-key path  
+- Docker clean start and `pytest` suite  
 
 Approximate time spent:
 
-- **3 hours** — understanding the problem, making notes, and brainstorming the theory solution  
+- **3 hours** — understanding the problem and brainstorming the theory solution  
 - **1 hour** — designing the frontend with Stitch by Google  
 - **7 hours** — coding and testing  
 
-**Total: about 11 hours**
+**Total: about 11 hours** (within the 10–12 hour time box)
+
+**Intentional omissions** (out of scope for this weekend box)
+
+- Authentication, roles, audit workflow, database persistence  
+- Multi-day / multi-station optimizer, manual drag allocation, logistics  
+- RAG / ML forecasting, paid infra beyond optional Gemini  
+- Kubernetes, microservices, mobile app  
