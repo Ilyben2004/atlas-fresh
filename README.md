@@ -21,12 +21,14 @@ docker compose up --build
 
 Open:
 
-| Service  | URL                          |
-|----------|------------------------------|
-| Frontend | http://localhost:3000        |
-| Backend  | http://localhost:8000        |
-| Health   | http://localhost:8000/health |
-| API docs | http://localhost:8000/docs   |
+
+| Service  | URL                                                          |
+| -------- | ------------------------------------------------------------ |
+| Frontend | [http://localhost:3000](http://localhost:3000)               |
+| Backend  | [http://localhost:8000](http://localhost:8000)               |
+| Health   | [http://localhost:8000/health](http://localhost:8000/health) |
+| API docs | [http://localhost:8000/docs](http://localhost:8000/docs)     |
+
 
 Stop:
 
@@ -41,22 +43,30 @@ docker compose build
 docker compose up -d
 ```
 
+
+
 ## Environment variables
 
-Copy `.env.example` to `.env` in the repo root. **Do not commit `.env` or API keys.**
+Copy `.env.example` to `.env` in the repo root. **Do not commit** `.env` **or API keys.**
 
-| Variable         | Purpose                                      | Default              |
-|------------------|----------------------------------------------|----------------------|
-| `GEMINI_API_KEY` | Google Gemini API key for the Plan Assistant | empty (no-key mode)  |
-| `GEMINI_MODEL`   | Gemini model name                            | `gemini-3.6-flash`   |
+
+| Variable         | Purpose                                      | Default             |
+| ---------------- | -------------------------------------------- | ------------------- |
+| `GEMINI_API_KEY` | Google Gemini API key for the Plan Assistant | empty (no-key mode) |
+| `GEMINI_MODEL`   | Gemini model name                            | `gemini-3.6-flash`  |
+
+
+
 
 ## Using the app
 
-1. Open http://localhost:3000  
-2. Upload an Excel workbook (Farms + Clients + Station)  
-3. Browse Overview, Production, Commercial, Ledger  
-4. Optionally edit sheets under **Inputs**, then **Save** and **Plan**  
-5. Open AI Plan Assistant: with a key, Gemini answers the three approved questions from plan data; without a key, a labelled deterministic summary is shown  
+1. Open [http://localhost:3000](http://localhost:3000)
+2. Upload an Excel workbook (Farms + Clients + Station)
+3. Browse Overview, Production, Commercial, Ledger
+4. Optionally edit sheets under **Inputs**, then **Save** and **Plan**
+5. Open AI Plan Assistant: with a key, Gemini answers the three approved questions from plan data; without a key, a labelled deterministic summary is shown
+
+
 
 ## Tests
 
@@ -93,41 +103,26 @@ React SPA (Overview, Inputs, Production, Commercial, Ledger, AI Assistant)
 - **Planning is deterministic and server-side** (price order, EXACT/MINIMUM, 5 t steps, station cap, local residual). The LLM never reallocates.
 - **Frontend** is a Vite + React SPA; **backend** is FastAPI + pandas/openpyxl for Excel ingest.
 
-## Assumptions
 
-- One station, one day, apples only; workbook sheets Farms / Clients / Station are authoritative.
-- Actual tonnes and demand are multiples of 5 t; segment mixes sum to 1.0.
-- Higher export price is served first; ties break on `client_id`.
-- Compatible supply prefers smallest quality upgrade, then `farm_id`.
-- Unexported fruit goes local at `local_market_ratio ×` segment reference price.
-- Paid APIs are optional; core product runs without Gemini.
 
 ## Limitations
 
 - No auth, DB, multi-day optimizer, logistics, or live deployment in this delivery.
-- Inputs editor is in-browser draft + JSON replan (no server-side draft persistence).
 - Assistant is limited to three analytical intents; off-topic questions are rejected.
-- Without `GEMINI_API_KEY`, there is no live LLM answer (honest no-key + deterministic summary only).
 
-## Next three production steps
 
-1. Persist plans and inputs (DB) with audit trail and role-based access.  
-2. CI pipeline (tests + image build) and a staging deploy behind config secrets.  
-3. Stronger assistant grounding (answer schema validation, eval set on baseline workbook) and observability for Gemini failures.
 
-## Walkthrough video
 
-3–5 minute demo for Production / Commercial users (upload → plan → views → Inputs replan → assistant).
-
-> Add the Loom / YouTube unlisted URL here before sending the submission email.
 
 ## AI tools, verification, time spent, intentional omissions
 
-| Tool | Role |
-|------|------|
-| **Stitch by Google** | AI design tool for frontend visual direction |
-| **Cursor** | Coding assistant for implementation and testing |
-| **Gemini** | Hosted model for the Plan Assistant (when keyed) |
+
+| Tool                 | Role                                             |
+| -------------------- | ------------------------------------------------ |
+| **Stitch by Google** | AI design tool for frontend visual direction     |
+| **Cursor**           | Coding assistant for implementation and testing  |
+| **Gemini**           | Hosted model for the Plan Assistant (when keyed) |
+
 
 **What was verified**
 
@@ -135,19 +130,16 @@ React SPA (Overview, Inputs, Production, Commercial, Ledger, AI Assistant)
 - Engine rules: ordering, EXACT/MINIMUM, capacity, local residual, quality upgrade  
 - Validation rejections (mix, 5 t multiples, modes, segments, prices, duplicates)  
 - Assistant: grounded IDs, reject / provider failure, no-key path  
-- Docker clean start and `pytest` suite  
+- Docker clean start and `pytest` suite
 
 Approximate time spent:
 
 - **3 hours** — understanding the problem and brainstorming the theory solution  
 - **1 hour** — designing the frontend with Stitch by Google  
-- **7 hours** — coding and testing  
+- **7 hours** — coding and testing
 
 **Total: about 11 hours** (within the 10–12 hour time box)
 
-**Intentional omissions** (out of scope for this weekend box)
 
-- Authentication, roles, audit workflow, database persistence  
-- Multi-day / multi-station optimizer, manual drag allocation, logistics  
-- RAG / ML forecasting, paid infra beyond optional Gemini  
-- Kubernetes, microservices, mobile app  
+
+With more time, I would connect Atlas Fresh to the company ERP so that an approved daily plan is written back into the corporate database (allocations, residuals, and shortage reasons) instead of staying only in the browser session — with validation, idempotent sync, and an audit trail before anything is marked executed.
