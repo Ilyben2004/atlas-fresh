@@ -284,7 +284,8 @@ export default function AiPlanAssistant({ plan }) {
               <ModeBadge mode={mode} />
             </div>
             <p className="mt-1 text-sm text-muted-soft">
-              Use a shortcut or paraphrase an approved intent. Off-topic asks are rejected.
+              With an API key, every approved question is answered live by Gemini from today’s
+              plan data — never a canned reply.
             </p>
           </div>
           {mode === "ready" && messages.length > 0 ? (
@@ -323,8 +324,9 @@ export default function AiPlanAssistant({ plan }) {
             <p className="mt-3 text-sm leading-relaxed text-ink">{deterministicSummary}</p>
             <p className="mt-4 font-mono text-[11px] text-[#6d7208]">
               Set <span className="font-semibold">GEMINI_API_KEY</span> in{" "}
-              <span className="font-semibold">.env</span>, then restart the backend for live
-              answers.
+              <span className="font-semibold">.env</span>, then restart the backend. Live
+              answers to the three approved questions always come from Gemini — this summary
+              is only the no-key fallback.
             </p>
           </div>
         ) : null}
@@ -344,7 +346,8 @@ export default function AiPlanAssistant({ plan }) {
                   Ask about today’s plan
                 </p>
                 <p className="mt-1 text-sm text-muted-soft">
-                  Client risk, farm gaps, or local residual — shortcuts or free text.
+                  Client risk, farm gaps, or local residual — Gemini writes each answer from
+                  the live plan.
                 </p>
               </div>
             ) : null}

@@ -37,38 +37,25 @@ Do not invent data. Do not answer in plain text on this turn — call a tool."""
 
 ANSWER_SYSTEM_PROMPT = """You are the Atlas Fresh Supply Chain AI writing for non-technical planners.
 
+You MUST write every answer yourself from the tool result JSON. Never paste a fixed template.
+There are no canned replies on the server — your generated text is the only answer.
+
 Rules:
-- Read-only: use only the tool result JSON. Do not invent numbers or IDs.
-- Plain English only. Never show technical codes (PARTIAL, UNSERVED, INSUFFICIENT_COMPATIBLE_SEGMENT, STATION_CAPACITY_REACHED, variance_t, snake_case fields).
-- Consistency is mandatory: for the same tool result, every answer must include the same facts in the same order and shape. Do not add extra commentary, tips, or skip fields.
-- No markdown: no headings, no **, no backticks, no bullet characters other than the numbered list.
-- Follow the ANSWER CONTRACT for the active tool exactly. Fill every required slot; omit nothing that the contract asks for; add nothing the contract does not ask for.
-- Cite only client IDs, farm IDs and segment labels that appear in the tool result. If a fact is missing, say it is unavailable.
+- Read-only: use only the tool result JSON. Do not invent numbers, farms, or clients.
+- Plain English only. Never show technical codes (PARTIAL, UNSERVED, INSUFFICIENT_COMPATIBLE_SEGMENT, STATION_CAPACITY_REACHED, variance_t, snake_case field names).
+- Prefer the plain-language fields already in the JSON (service_level, plain_reason, short_by_tonnes, quality_rule, etc.).
+- Always cite real client IDs / farm IDs / quality grades that appear in the tool result.
+- Cover every client or farm in the tool result; do not stop mid-list.
+- Structure: one short opening sentence, then a numbered list (1. 2. 3. …). No markdown headings, bold (**), or backticks.
+- If the tool result is empty for that intent, say clearly that nothing is at risk / no farms are short / no local volume today.
+- If a needed fact is missing from the JSON, say it is unavailable — do not guess.
 
-ANSWER CONTRACT — get_clients_at_risk:
-Line 1: "<N> clients still need fruit today:" (or "1 client still needs fruit today:" / "Every client was fully served today." if empty).
-Then one numbered line per client, in the same order as the JSON, each exactly:
-"<n>. <client_name> (<client_id>) — <service_level>; wanted <wanted_tonnes> t, received <received_tonnes> t, still needs <still_needed_tonnes> t; quality <requested_quality> (<quality_rule>); because <plain_reason>."
-If plain_reason is missing, end with "because supply was not enough for this order."
-No closing tip. No extra sentences.
+Intent focus by tool:
+- get_clients_at_risk: who still needs fruit, how much, quality rule, and why.
+- get_farm_segment_gaps: which farms are short vs expected, by how much, and A/B/C/D delivered.
+- get_local_residual_value: how much goes local, estimated value, whether the station is full, and main farms sending local.
 
-ANSWER CONTRACT — get_farm_segment_gaps:
-Line 1: If top_shortages is empty: "No farm delivered less than expected today."
-Else if limit_applied is null: "<shortage_farm_count> farms are short today, biggest shortfalls first:"
-Else: "Top <listed_count> farm shortfalls today (of <shortage_farm_count> farms short), biggest first:"
-Then one numbered line per farm in top_shortages (list every farm in that array; do not invent extra farms), each exactly:
-"<n>. <farm_name> (<farm_id>) — delivered <delivered_tonnes> t vs <expected_tonnes> t expected (short by <short_by_tonnes> t); quality delivered A <A> t, B <B> t, C <C> t, D <D> t; left unexported <left_unexported_tonnes> t."
-Use 0 when a quality grade is missing. No closing tip. No extra sentences.
-
-ANSWER CONTRACT — get_local_residual_value:
-Line 1: "About <tonnes_going_local> t is going to the local market today, worth roughly €<estimated_local_value_eur>."
-Line 2: If station_is_full is true: "The export station is full (<exported_tonnes> t of <station_limit_tonnes> t), so leftover fruit could not be exported."
-Else: "The export station is not full (<exported_tonnes> t of <station_limit_tonnes> t); leftover fruit remains after export allocations."
-If main_farms_sending_local is non-empty, then line "Main farms sending fruit local:" followed by numbered lines:
-"<n>. <farm_name> (<farm_id>) — <tonnes_going_local> t local."
-No closing tip. No extra sentences.
-
-Round tonnes sensibly for reading (whole numbers when close to whole). Keep euro amounts as whole euros with thousands separators when helpful."""
+Round tonnes sensibly for reading. Keep euro amounts readable."""
 
 ENTITY_ID_RE = re.compile(r"\b([A-Z]{1,6}\d{1,4})\b")
 SEGMENT_LABELS = frozenset({"A", "B", "C", "D"})
@@ -120,12 +107,15 @@ async def chat(payload: ChatRequest) -> ChatResponse:
 
     api_key = _gemini_api_key()
     if not api_key:
+        # No model path: never invent an AI answer. UI shows deterministic KPI summary.
         return ChatResponse(status="no_key", question=question, answer=None, tool=None)
 
     requested_tool = (payload.tool or "").strip() or None
     tool_args: dict[str, Any] = {}
 
     try:
+        # With a key, every approved question is answered by Gemini (no hardcoded reply text).
+        # Optional `tool` from UI shortcuts only selects which data tool to run — not the prose.
         if requested_tool:
             if requested_tool not in ALLOWED_TOOL_NAMES:
                 raise HTTPException(
@@ -160,12 +150,15 @@ async def chat(payload: ChatRequest) -> ChatResponse:
                 )
 
         tool_result = run_tool(tool_name, payload.context, tool_args)
+        # Always generate the answer with Gemini — never assemble reply text locally.
         answer = await _answer_from_tool(
             api_key=api_key,
             question=question,
             tool_name=tool_name,
             tool_result=tool_result,
         )
+        if not (answer or "").strip():
+            raise RuntimeError("Gemini returned an empty answer.")
         answer = ground_answer(answer, payload.context, tool_result)
     except HTTPException:
         raise
@@ -244,7 +237,7 @@ async def _answer_from_tool(
     tool_name: str,
     tool_result: dict[str, Any],
 ) -> str:
-    contract_name = tool_name
+    """Ask Gemini to write the user-facing answer from tool JSON (never hardcoded)."""
     body = {
         "system_instruction": {"parts": [{"text": ANSWER_SYSTEM_PROMPT}]},
         "contents": [
@@ -254,19 +247,19 @@ async def _answer_from_tool(
                     {
                         "text": (
                             f"User question:\n{question}\n\n"
-                            f"Active tool / contract: {contract_name}\n\n"
+                            f"Data tool used: {tool_name}\n\n"
                             "Tool result JSON (authoritative — answer only from this):\n"
                             f"{json.dumps(tool_result, default=str)}\n\n"
-                            f"Write the full answer using ONLY the ANSWER CONTRACT for "
-                            f"{contract_name}. Same facts, same order, every required field. "
-                            "Do not stop mid-sentence. Do not add tips or extra commentary."
+                            "Write a complete plain-language answer now in your own words. "
+                            "Use only facts from the JSON. Cover every client or farm listed. "
+                            "Do not use a fixed template. Do not invent IDs or numbers."
                         )
                     }
                 ],
             }
         ],
         "generationConfig": {
-            "temperature": 0.0,
+            "temperature": 0.3,
             "maxOutputTokens": 4096,
             "thinkingConfig": {
                 "thinkingLevel": "minimal",
