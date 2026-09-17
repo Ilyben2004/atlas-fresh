@@ -55,7 +55,8 @@ Copy `.env.example` to `.env` in the repo root:
 1. Open http://localhost:3000  
 2. Upload an Excel workbook (Farms + Clients + Station)  
 3. Browse Overview, Production, Commercial, Ledger  
-4. Open AI Plan Assistant and pick one of the three approved questions  
+4. Optionally edit sheets under **Inputs**, then **Save** and **Plan**  
+5. Open AI Plan Assistant and pick one of the three approved questions  
 
 ## Tests
 
@@ -71,3 +72,18 @@ docker compose build backend
 docker compose up -d backend
 docker compose exec backend python -m pytest -q
 ```
+
+## AI tools and time spent
+
+| Tool | Role |
+|------|------|
+| **Stitch by Google** | AI design tool used for frontend visual design |
+| **Cursor** | Coding assistant used while implementing and testing |
+
+Approximate time spent:
+
+- **3 hours** — understanding the problem, making notes, and brainstorming the theory solution  
+- **1 hour** — designing the frontend with Stitch by Google  
+- **7 hours** — coding and testing  
+
+**Total: about 11 hours**
