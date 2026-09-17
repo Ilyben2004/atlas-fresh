@@ -2,13 +2,38 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from chat_tools import ALLOWED_TOOL_NAMES, run_tool
+from chat_tools import (
+    ALLOWED_TOOL_NAMES,
+    REJECT_TOOL_NAME,
+    gemini_tool_declarations,
+    known_entity_ids,
+    run_tool,
+)
+
+ROUTE_SYSTEM_PROMPT = """You are the Atlas Fresh Supply Chain AI router.
+You analyze daily apple allocation dashboards in read-only mode.
+
+You MUST call exactly one tool:
+- get_clients_at_risk
+- get_farm_segment_gaps
+- get_local_residual_value
+- reject_question
+
+Map paraphrases and different numbers to the matching intent tool.
+Examples:
+- "why are 55t going local?" → get_local_residual_value
+- "which clients were shorted?" → get_clients_at_risk
+- "biggest orchard shortages today?" → get_farm_segment_gaps
+- "write a poem" → reject_question
+
+Do not invent data. Do not answer in plain text on this turn — call a tool."""
 
 ANSWER_SYSTEM_PROMPT = """You are the Atlas Fresh Supply Chain AI writing for non-technical planners.
 
@@ -18,6 +43,7 @@ Rules:
 - Consistency is mandatory: for the same tool result, every answer must include the same facts in the same order and shape. Do not add extra commentary, tips, or skip fields.
 - No markdown: no headings, no **, no backticks, no bullet characters other than the numbered list.
 - Follow the ANSWER CONTRACT for the active tool exactly. Fill every required slot; omit nothing that the contract asks for; add nothing the contract does not ask for.
+- Cite only client IDs, farm IDs and segment labels that appear in the tool result. If a fact is missing, say it is unavailable.
 
 ANSWER CONTRACT — get_clients_at_risk:
 Line 1: "<N> clients still need fruit today:" (or "1 client still needs fruit today:" / "Every client was fully served today." if empty).
@@ -44,6 +70,9 @@ No closing tip. No extra sentences.
 
 Round tonnes sensibly for reading (whole numbers when close to whole). Keep euro amounts as whole euros with thousands separators when helpful."""
 
+ENTITY_ID_RE = re.compile(r"\b([A-Z]{1,6}\d{1,4})\b")
+SEGMENT_LABELS = frozenset({"A", "B", "C", "D"})
+
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 GEMINI_TIMEOUT_SECONDS = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "30"))
 
@@ -52,7 +81,7 @@ router = APIRouter(tags=["chat"])
 
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1)
-    tool: str = Field(min_length=1)
+    tool: str | None = None
     context: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -86,31 +115,58 @@ def chat_status() -> ChatStatusResponse:
 @router.post("/chat", response_model=ChatResponse)
 async def chat(payload: ChatRequest) -> ChatResponse:
     question = payload.question.strip()
-    tool_name = payload.tool.strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
-    if tool_name not in ALLOWED_TOOL_NAMES:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Invalid tool. Choose one of: get_clients_at_risk, "
-                "get_farm_segment_gaps, get_local_residual_value."
-            ),
-        )
 
     api_key = _gemini_api_key()
     if not api_key:
         return ChatResponse(status="no_key", question=question, answer=None, tool=None)
 
+    requested_tool = (payload.tool or "").strip() or None
+    tool_args: dict[str, Any] = {}
+
     try:
-        # Intent is chosen in the UI — skip Gemini tool-calling / routing.
-        tool_result = run_tool(tool_name, payload.context)
+        if requested_tool:
+            if requested_tool not in ALLOWED_TOOL_NAMES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Invalid tool. Choose one of: get_clients_at_risk, "
+                        "get_farm_segment_gaps, get_local_residual_value."
+                    ),
+                )
+            tool_name = requested_tool
+        else:
+            tool_name, tool_args = await _route_with_tools(
+                api_key=api_key, question=question
+            )
+            if tool_name == REJECT_TOOL_NAME:
+                reason = str(
+                    tool_args.get("reason") or "Question is outside approved intents."
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Question is not allowed. Ask about clients at risk, "
+                        f"farm/segment gaps, or local residual value. ({reason})"
+                    ),
+                )
+            if tool_name not in ALLOWED_TOOL_NAMES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Question is not allowed. No approved analytical tool was selected."
+                    ),
+                )
+
+        tool_result = run_tool(tool_name, payload.context, tool_args)
         answer = await _answer_from_tool(
             api_key=api_key,
             question=question,
             tool_name=tool_name,
             tool_result=tool_result,
         )
+        answer = ground_answer(answer, payload.context, tool_result)
     except HTTPException:
         raise
     except httpx.TimeoutException as exc:
@@ -128,6 +184,57 @@ async def chat(payload: ChatRequest) -> ChatResponse:
         answer=answer,
         tool=tool_name,
     )
+
+
+async def _route_with_tools(*, api_key: str, question: str) -> tuple[str, dict[str, Any]]:
+    body = {
+        "system_instruction": {"parts": [{"text": ROUTE_SYSTEM_PROMPT}]},
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "text": (
+                            "Classify this user question into exactly one tool call.\n"
+                            f"Question: {question}"
+                        )
+                    }
+                ],
+            }
+        ],
+        "tools": [{"function_declarations": gemini_tool_declarations()}],
+        "toolConfig": {
+            "functionCallingConfig": {
+                "mode": "ANY",
+                "allowedFunctionNames": [
+                    "get_clients_at_risk",
+                    "get_farm_segment_gaps",
+                    "get_local_residual_value",
+                    "reject_question",
+                ],
+            }
+        },
+        "generationConfig": {
+            "temperature": 0.0,
+            "maxOutputTokens": 256,
+        },
+    }
+
+    data = await _gemini_post(api_key=api_key, body=body)
+    call = _extract_function_call(data)
+    if call is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Question is not allowed. The assistant could not route it "
+                "to an approved tool."
+            ),
+        )
+    name = str(call.get("name") or "")
+    args = call.get("args") or {}
+    if not isinstance(args, dict):
+        args = {}
+    return name, args
 
 
 async def _answer_from_tool(
@@ -159,7 +266,6 @@ async def _answer_from_tool(
             }
         ],
         "generationConfig": {
-            # Low temperature keeps wording/structure stable across repeats.
             "temperature": 0.0,
             "maxOutputTokens": 4096,
             "thinkingConfig": {
@@ -181,11 +287,31 @@ async def _answer_from_tool(
     return text
 
 
+def ground_answer(
+    answer: str,
+    context: dict[str, Any],
+    tool_result: dict[str, Any] | None = None,
+) -> str:
+    """Keep only resolvable farm/client IDs; replace unknown IDs."""
+    allowed = known_entity_ids(context, tool_result)
+    if not answer:
+        return answer
+
+    def _replace(match: re.Match[str]) -> str:
+        token = match.group(1)
+        if token in SEGMENT_LABELS:
+            return token
+        if token in allowed:
+            return token
+        return "unavailable"
+
+    return ENTITY_ID_RE.sub(_replace, answer)
+
+
 async def _gemini_post(*, api_key: str, body: dict[str, Any]) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=GEMINI_TIMEOUT_SECONDS) as client:
         response = await client.post(_gemini_url(), params={"key": api_key}, json=body)
     if response.status_code >= 400:
-        # Older models reject thinkingLevel — retry once without thinkingConfig.
         message = _extract_gemini_error_message(response.text)
         if (
             response.status_code == 400
@@ -217,16 +343,29 @@ def _extract_gemini_error_message(raw: str) -> str:
 def _public_provider_error(exc: Exception) -> str:
     text = str(exc).strip()
     if text.startswith("Gemini HTTP"):
-        # Keep upstream reason visible (API key never included in Gemini bodies).
         return f"Gemini provider failed. {text}"
     return "Gemini provider failed. The assistant is temporarily unavailable."
+
+
+def _extract_function_call(data: dict[str, Any]) -> dict[str, Any] | None:
+    candidates = data.get("candidates") or []
+    if not candidates:
+        return None
+    parts = (candidates[0].get("content") or {}).get("parts") or []
+    for part in parts:
+        call = part.get("functionCall") or part.get("function_call")
+        if call and call.get("name"):
+            return call
+    return None
 
 
 def _finish_reason(data: dict[str, Any]) -> str:
     candidates = data.get("candidates") or []
     if not candidates:
         return ""
-    return str(candidates[0].get("finishReason") or candidates[0].get("finish_reason") or "")
+    return str(
+        candidates[0].get("finishReason") or candidates[0].get("finish_reason") or ""
+    )
 
 
 def _extract_text(data: dict[str, Any]) -> str:
@@ -236,11 +375,9 @@ def _extract_text(data: dict[str, Any]) -> str:
     parts = (candidates[0].get("content") or {}).get("parts") or []
     chunks: list[str] = []
     for part in parts:
-        # Skip internal thought parts — only keep visible answer text.
         if part.get("thought") is True:
             continue
         text = part.get("text")
         if text:
             chunks.append(str(text))
     return "".join(chunks).strip()
-

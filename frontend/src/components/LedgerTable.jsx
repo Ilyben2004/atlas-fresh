@@ -51,6 +51,14 @@ export default function LedgerTable({ plan }) {
                 onSort={toggleSort}
               />
               <SortableTh
+                label="Upgrade"
+                sortKey="quality_upgrade"
+                activeKey={sortKey}
+                direction={sortDir}
+                onSort={toggleSort}
+                align="right"
+              />
+              <SortableTh
                 label="Tonnes"
                 sortKey="tonnes_allocated"
                 activeKey={sortKey}
@@ -71,7 +79,7 @@ export default function LedgerTable({ plan }) {
           <tbody className="divide-y divide-row-line">
             {sortedRows.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-4 py-16 text-center text-sm text-muted-soft">
+                <td colSpan={7} className="px-4 py-16 text-center text-sm text-muted-soft">
                   Ledger rows appear when export allocations are created.
                 </td>
               </tr>
@@ -94,6 +102,9 @@ export default function LedgerTable({ plan }) {
                   </td>
                   <td className="px-4 py-3 font-mono text-[13px] font-semibold text-ink">
                     {row.client_id}
+                  </td>
+                  <td className="px-4 py-3 text-right font-mono text-[12px] text-muted">
+                    {row.quality_upgrade ? `+${row.quality_upgrade}` : "—"}
                   </td>
                   <td className="px-4 py-3 text-right">
                     <Metric size="sm" tone="accent">

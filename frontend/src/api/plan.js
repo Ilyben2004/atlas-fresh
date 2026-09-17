@@ -52,11 +52,14 @@ export async function getChatStatus() {
   return payload;
 }
 
-export async function askPlanAssistant(question, context, tool) {
+export async function askPlanAssistant(question, context, tool = null) {
+  const body = { question, context };
+  if (tool) body.tool = tool;
+
   const response = await fetch(`${API_BASE}/api/v1/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, context, tool }),
+    body: JSON.stringify(body),
   });
 
   const payload = await readJson(response);

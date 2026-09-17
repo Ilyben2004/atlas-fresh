@@ -25,6 +25,11 @@ export default function CommercialTable({ plan }) {
     () =>
       rows.map((row) => ({
         ...row,
+        remaining_t:
+          row.remaining_t ?? Math.max(0, (row.demand || 0) - (row.allocated_t || 0)),
+        export_revenue_eur:
+          row.export_revenue_eur ??
+          (row.allocated_t || 0) * (row.export_price_per_eur || 0),
         shortage_sort: row.shortage_reason || "",
       })),
     [rows],
@@ -46,7 +51,7 @@ export default function CommercialTable({ plan }) {
           </span>
         </div>
         <p className="mt-1 text-sm text-muted-soft">
-          Click any column header to sort · EXACT / MINIMUM segment rules
+          Demand, allocated, remaining and export revenue · EXACT / MINIMUM rules
         </p>
       </div>
 
@@ -92,8 +97,24 @@ export default function CommercialTable({ plan }) {
                 align="right"
               />
               <SortableTh
+                label="Remaining"
+                sortKey="remaining_t"
+                activeKey={sortKey}
+                direction={sortDir}
+                onSort={toggleSort}
+                align="right"
+              />
+              <SortableTh
                 label="Price"
                 sortKey="export_price_per_eur"
+                activeKey={sortKey}
+                direction={sortDir}
+                onSort={toggleSort}
+                align="right"
+              />
+              <SortableTh
+                label="Revenue"
+                sortKey="export_revenue_eur"
                 activeKey={sortKey}
                 direction={sortDir}
                 onSort={toggleSort}
@@ -118,7 +139,7 @@ export default function CommercialTable({ plan }) {
           <tbody className="divide-y divide-row-line">
             {sortedRows.length === 0 ? (
               <tr>
-                <td colSpan={8} className="px-4 py-16 text-center text-sm text-muted-soft">
+                <td colSpan={10} className="px-4 py-16 text-center text-sm text-muted-soft">
                   Client allocations appear after a successful plan upload.
                 </td>
               </tr>
@@ -166,8 +187,21 @@ export default function CommercialTable({ plan }) {
                     </Metric>
                   </td>
                   <td className="px-4 py-3 text-right">
+                    <Metric
+                      size="sm"
+                      tone={row.remaining_t > 1e-9 ? "warn" : "muted"}
+                    >
+                      {formatTonnes(row.remaining_t)}
+                    </Metric>
+                  </td>
+                  <td className="px-4 py-3 text-right">
                     <Metric size="sm" tone="deep">
                       {formatEuroExact(row.export_price_per_eur)}
+                    </Metric>
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    <Metric size="sm" tone="accent">
+                      {formatEuroExact(row.export_revenue_eur)}
                     </Metric>
                   </td>
                   <td className="px-4 py-3">

@@ -2,25 +2,60 @@ import { useMemo, useState } from "react";
 import { SortableTh, useSortableRows } from "../hooks/useSortableRows.jsx";
 import { formatNumber, formatTonnes, Icon, Metric } from "../utils/format.jsx";
 
-function SegmentChips({ row }) {
+function SegmentMix({ row }) {
   const segments = [
-    { key: "A", value: row.actual_A, tone: "bg-chip-bg text-[#3f6b00] border-[#9aae37]/40" },
-    { key: "B", value: row.actual_B, tone: "bg-canvas text-ink border-line" },
-    { key: "C", value: row.actual_C, tone: "bg-[#fff7ed] text-[#9b4500] border-[#fdba74]/50" },
-    { key: "D", value: row.actual_D, tone: "bg-[#f8faf0] text-muted border-line" },
+    {
+      key: "A",
+      tone: "bg-chip-bg text-[#3f6b00] border-[#9aae37]/40",
+    },
+    {
+      key: "B",
+      tone: "bg-canvas text-ink border-line",
+    },
+    {
+      key: "C",
+      tone: "bg-[#fff7ed] text-[#9b4500] border-[#fdba74]/50",
+    },
+    {
+      key: "D",
+      tone: "bg-[#f8faf0] text-muted border-line",
+    },
   ];
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      {segments.map((segment) => (
-        <span
-          key={segment.key}
-          className={`rounded-sm border px-2.5 py-1 font-mono text-[12px] font-semibold ${segment.tone}`}
-        >
-          {formatNumber(segment.value, segment.value % 1 === 0 ? 0 : 1)}
-          <span className="ml-1 opacity-70">{segment.key}</span>
-        </span>
-      ))}
+      {segments.map((segment) => {
+        const actual = Number(row[`actual_${segment.key}`] ?? 0);
+        const expected = Number(row[`expected_${segment.key}`] ?? 0);
+        const variance = Number(row[`variance_${segment.key}`] ?? actual - expected);
+        const varLabel =
+          Math.abs(variance) < 1e-9
+            ? "0"
+            : `${variance > 0 ? "+" : ""}${formatNumber(variance)}`;
+        return (
+          <span
+            key={segment.key}
+            title={`Expected ${formatNumber(expected)} t · Actual ${formatNumber(actual)} t · Δ ${varLabel} t`}
+            className={`rounded-sm border px-2 py-1 font-mono text-[11px] font-semibold ${segment.tone}`}
+          >
+            <span className="opacity-70">{segment.key}</span>{" "}
+            {formatNumber(actual, actual % 1 === 0 ? 0 : 1)}
+            <span className="mx-0.5 opacity-50">/</span>
+            {formatNumber(expected, expected % 1 === 0 ? 0 : 1)}
+            <span
+              className={`ml-1 ${
+                variance < -1e-9
+                  ? "text-[#991b1b]"
+                  : variance > 1e-9
+                    ? "text-[#3f6b00]"
+                    : "opacity-60"
+              }`}
+            >
+              ({varLabel})
+            </span>
+          </span>
+        );
+      })}
     </div>
   );
 }
@@ -121,6 +156,9 @@ export default function ProductionTable({ plan }) {
               </span>
             ) : null}
           </div>
+          <p className="mt-1 text-sm text-muted-soft">
+            Expected mix vs actual A/B/C/D · segment Δ in parentheses
+          </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
@@ -188,7 +226,7 @@ export default function ProductionTable({ plan }) {
                 align="right"
               />
               <th className="px-4 py-3.5 text-left font-semibold uppercase tracking-wider text-ink">
-                Segments
+                Mix actual / expected (Δ)
               </th>
               <SortableTh
                 label="Variance"
@@ -246,7 +284,7 @@ export default function ProductionTable({ plan }) {
                     </Metric>
                   </td>
                   <td className="px-4 py-3">
-                    <SegmentChips row={row} />
+                    <SegmentMix row={row} />
                   </td>
                   <td className="px-4 py-3 text-right">
                     <VarianceBadge value={row.variance_t} />

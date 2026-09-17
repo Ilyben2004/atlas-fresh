@@ -106,8 +106,14 @@ def ingest_plan_workbook(
     clients_df = _read_sheet(workbook, clients_sheet, CLIENT_COLUMNS, ClientInput)
     station = _read_station(workbook, station_sheet)
 
-    farms = _validate_records(farms_df, FarmInput, entity="farm")
-    clients = _validate_records(clients_df, ClientInput, entity="client")
+    farms = _validate_records(farms_df, FarmInput, entity="farm", sheet_name=farms_sheet)
+    clients = _validate_records(
+        clients_df, ClientInput, entity="client", sheet_name=clients_sheet
+    )
+    _reject_duplicate_ids(farms, id_attr="farm_id", entity="farm", sheet_name=farms_sheet)
+    _reject_duplicate_ids(
+        clients, id_attr="client_id", entity="client", sheet_name=clients_sheet
+    )
     return farms, clients, station
 
 
@@ -247,7 +253,12 @@ def _read_station(workbook: pd.ExcelFile, sheet_name: str) -> StationInput:
             f"Sheet '{sheet_name}' does not contain a complete station row."
         )
 
-    segment_prices = _read_segment_prices(raw)
+    segment_prices = _read_segment_prices(raw, sheet_name=sheet_name)
+    if not segment_prices:
+        raise IngestionError(
+            f"Sheet '{sheet_name}': missing segment reference-price table "
+            "(need segment and reference export price for A, B, C and D)."
+        )
 
     try:
         return StationInput.model_validate(
@@ -260,11 +271,12 @@ def _read_station(workbook: pd.ExcelFile, sheet_name: str) -> StationInput:
                 row_number=1,
                 record=station_record,
                 exc=exc,
+                sheet_name=sheet_name,
             )
         ) from exc
 
 
-def _read_segment_prices(raw: pd.DataFrame) -> list[dict[str, Any]]:
+def _read_segment_prices(raw: pd.DataFrame, *, sheet_name: str) -> list[dict[str, Any]]:
     header_idx = _find_header_row(raw, SEGMENT_PRICE_COLUMNS)
     if header_idx is None:
         return []
@@ -295,6 +307,7 @@ def _read_segment_prices(raw: pd.DataFrame) -> list[dict[str, Any]]:
                     row_number=index,
                     record=record,
                     exc=exc,
+                    sheet_name=sheet_name,
                 )
             ) from exc
     return validated
@@ -334,6 +347,7 @@ def _validate_records(
     model: type[FarmInput] | type[ClientInput],
     *,
     entity: str,
+    sheet_name: str,
 ) -> list[Any]:
     records = frame.to_dict(orient="records")
     validated: list[Any] = []
@@ -347,9 +361,28 @@ def _validate_records(
                     row_number=index,
                     record=record,
                     exc=exc,
+                    sheet_name=sheet_name,
                 )
             ) from exc
     return validated
+
+
+def _reject_duplicate_ids(
+    rows: list[Any],
+    *,
+    id_attr: str,
+    entity: str,
+    sheet_name: str,
+) -> None:
+    seen: dict[str, int] = {}
+    for index, row in enumerate(rows, start=1):
+        value = str(getattr(row, id_attr)).strip()
+        if value in seen:
+            raise IngestionError(
+                f"Sheet '{sheet_name}': duplicate {entity} ID '{value}' "
+                f"(rows {seen[value]} and {index})."
+            )
+        seen[value] = index
 
 
 def _format_validation_error(
@@ -358,6 +391,7 @@ def _format_validation_error(
     row_number: int,
     record: dict[str, Any],
     exc: ValidationError,
+    sheet_name: str | None = None,
 ) -> str:
     identity_key = {
         "farm": "farm_id",
@@ -366,10 +400,14 @@ def _format_validation_error(
         "segment price": "segment",
     }.get(entity)
     identity = record.get(identity_key) if identity_key else None
+    sheet_prefix = f"Sheet '{sheet_name}': " if sheet_name else ""
     if identity in (None, ""):
-        prefix = f"Validation failed for {entity} at row {row_number}"
+        prefix = f"{sheet_prefix}Validation failed for {entity} at row {row_number}"
     else:
-        prefix = f"Validation failed for {entity} '{identity}' (row {row_number})"
+        prefix = (
+            f"{sheet_prefix}Validation failed for {entity} '{identity}' "
+            f"(row {row_number})"
+        )
 
     details: list[str] = []
     for error in exc.errors():

@@ -180,6 +180,37 @@ TOOL_HANDLERS = {
 }
 
 
+def known_entity_ids(
+    context: dict[str, Any],
+    tool_result: dict[str, Any] | None = None,
+) -> set[str]:
+    """Collect resolvable farm/client IDs from plan context and tool output."""
+    ids: set[str] = set()
+
+    def _add(value: object) -> None:
+        text = str(value or "").strip().upper()
+        if text:
+            ids.add(text)
+
+    for row in context.get("commercial_view") or []:
+        _add(row.get("client_id"))
+    for row in context.get("production_view") or []:
+        _add(row.get("farm_id"))
+    for row in context.get("traceability_ledger") or []:
+        _add(row.get("client_id"))
+        _add(row.get("farm_id"))
+
+    if tool_result:
+        for row in tool_result.get("clients") or []:
+            _add(row.get("client_id"))
+        for row in tool_result.get("top_shortages") or []:
+            _add(row.get("farm_id"))
+        for row in tool_result.get("main_farms_sending_local") or []:
+            _add(row.get("farm_id"))
+
+    return ids
+
+
 def _parse_limit(args: dict[str, Any] | None) -> int | None:
     if not args:
         return None

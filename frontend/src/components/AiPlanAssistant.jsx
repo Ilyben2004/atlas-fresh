@@ -95,7 +95,7 @@ function ModeBadge({ mode }) {
   if (mode === "no_key") {
     return (
       <span className="rounded-sm border border-[#f59e0b]/45 bg-[#fef3c7] px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wide text-[#654a09]">
-        No API key
+        No API key · Deterministic
       </span>
     );
   }
@@ -130,9 +130,14 @@ function buildDeterministicSummary(plan) {
     .sort((a, b) => a.variance_t - b.variance_t)
     .slice(0, 3);
 
+  const totalValue =
+    kpis.total_value_eur ??
+    (kpis.total_export_revenue_eur || 0) + (kpis.total_local_revenue_eur || 0);
+
   const lines = [
-    `Today the station exported ${formatTonnes(kpis.total_exported_t)} out of its ${formatTonnes(kpis.export_capacity_t)} limit.`,
-    `Total value is about ${formatEuro((kpis.total_export_revenue_eur || 0) + (kpis.total_local_revenue_eur || 0))} (export plus local).`,
+    `Today the station exported ${formatTonnes(kpis.total_exported_t)} out of its ${formatTonnes(kpis.export_capacity_t)} limit (export rate ${formatNumber(kpis.export_rate_pct, 1)}%).`,
+    `Planned intake was about ${formatTonnes(kpis.total_expected_t ?? 0)}; actual received ${formatTonnes(kpis.total_actual_received_t)}.`,
+    `Export revenue is about ${formatEuro(kpis.total_export_revenue_eur)}; total value (export + local) is about ${formatEuro(totalValue)}.`,
     `${formatTonnes(kpis.total_local_residual_t)} could not be exported and is valued locally at about ${formatEuro(kpis.total_local_revenue_eur)}.`,
   ];
 
@@ -151,7 +156,7 @@ function buildDeterministicSummary(plan) {
       `Biggest farm shortfalls: ${shortages
         .map(
           (row) =>
-            `${row.farm_name || row.farm_id} short by ${formatNumber(Math.abs(row.variance_t))} t`,
+            `${row.farm_name || row.farm_id} (${row.farm_id}) short by ${formatNumber(Math.abs(row.variance_t))} t`,
         )
         .join("; ")}.`,
     );
@@ -175,6 +180,7 @@ export default function AiPlanAssistant({ plan }) {
   const [messages, setMessages] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [draft, setDraft] = useState("");
   const [shortcutsOpen, setShortcutsOpen] = useState(readShortcutsOpen);
   const bottomRef = useRef(null);
 
@@ -208,17 +214,16 @@ export default function AiPlanAssistant({ plan }) {
     }
   }, [shortcutsOpen]);
 
-  async function handleAsk(intent) {
-    const question = (intent?.question || "").trim();
-    const tool = (intent?.tool || "").trim();
-    if (!plan || busy || !question || !tool) return;
+  async function handleAsk(question, tool = null) {
+    const cleaned = (question || "").trim();
+    if (!plan || busy || !cleaned) return;
 
     setBusy(true);
     setError(null);
-    setMessages((current) => [...current, { role: "user", text: question }]);
+    setMessages((current) => [...current, { role: "user", text: cleaned }]);
 
     try {
-      const payload = await askPlanAssistant(question, plan, tool);
+      const payload = await askPlanAssistant(cleaned, plan, tool);
       if (payload.status === "no_key") {
         setMode("no_key");
         setMessages((current) => current.slice(0, -1));
@@ -229,14 +234,14 @@ export default function AiPlanAssistant({ plan }) {
         {
           role: "assistant",
           text: payload.answer || "No answer returned.",
-          tool: payload.tool || tool,
+          tool: payload.tool || tool || null,
         },
       ]);
     } catch (err) {
       const message = err.message || "Assistant request failed";
       setError(message);
       const isRejected =
-        /not allowed|invalid tool/i.test(message) || /400/.test(message);
+        /not allowed|invalid tool|approved/i.test(message) || /400/.test(message);
       const isUnavailable =
         /timed out|unavailable|503|provider/i.test(message) && !isRejected;
       setMessages((current) => [
@@ -255,6 +260,14 @@ export default function AiPlanAssistant({ plan }) {
     }
   }
 
+  function submitDraft(event) {
+    event.preventDefault();
+    const question = draft.trim();
+    if (!question) return;
+    setDraft("");
+    handleAsk(question, null);
+  }
+
   function clearChat() {
     setMessages([]);
     setError(null);
@@ -271,7 +284,7 @@ export default function AiPlanAssistant({ plan }) {
               <ModeBadge mode={mode} />
             </div>
             <p className="mt-1 text-sm text-muted-soft">
-              Choose one of the three approved questions. Free typing is disabled.
+              Use a shortcut or paraphrase an approved intent. Off-topic asks are rejected.
             </p>
           </div>
           {mode === "ready" && messages.length > 0 ? (
@@ -297,13 +310,21 @@ export default function AiPlanAssistant({ plan }) {
         ) : null}
 
         {mode === "no_key" ? (
-          <div className="rounded-xl border border-line bg-white p-5 shadow-[0_1px_0_rgba(61,72,6,0.04)]">
-            <div className="font-display text-base font-semibold text-ink">
-              Deterministic KPI summary
+          <div className="mx-auto w-full max-w-3xl rounded-xl border border-[#f59e0b]/40 bg-[#fffdf5] p-5">
+            <div className="flex flex-wrap items-center gap-2">
+              <Icon name="analytics" className="text-[20px] text-[#654a09]" />
+              <div className="font-display text-base font-semibold text-ink">
+                Deterministic KPI summary
+              </div>
+              <span className="rounded-sm border border-[#f59e0b]/40 bg-[#fef3c7] px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wide text-[#654a09]">
+                Not AI-generated
+              </span>
             </div>
             <p className="mt-3 text-sm leading-relaxed text-ink">{deterministicSummary}</p>
             <p className="mt-4 font-mono text-[11px] text-[#6d7208]">
-              Set GEMINI_API_KEY on the backend to enable live answers.
+              Set <span className="font-semibold">GEMINI_API_KEY</span> in{" "}
+              <span className="font-semibold">.env</span>, then restart the backend for live
+              answers.
             </p>
           </div>
         ) : null}
@@ -320,10 +341,10 @@ export default function AiPlanAssistant({ plan }) {
               <div className="rounded-xl border border-dashed border-[#9aae37]/45 bg-white/80 px-5 py-8 text-center">
                 <Icon name="chat" className="mx-auto text-[28px] text-[#7e941e]" />
                 <p className="mt-3 font-display text-lg font-semibold text-ink">
-                  Choose a question below
+                  Ask about today’s plan
                 </p>
                 <p className="mt-1 text-sm text-muted-soft">
-                  Only the three approved questions can be asked.
+                  Client risk, farm gaps, or local residual — shortcuts or free text.
                 </p>
               </div>
             ) : null}
@@ -410,7 +431,7 @@ export default function AiPlanAssistant({ plan }) {
                   key={intent.tool}
                   type="button"
                   disabled={!canChat}
-                  onClick={() => handleAsk(intent)}
+                  onClick={() => handleAsk(intent.question, intent.tool)}
                   className="group flex items-start gap-2 rounded-xl border border-line bg-white px-3 py-2.5 text-left text-sm font-medium text-ink transition-colors hover:border-[#9aae37]/70 hover:bg-chip-bg disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Icon
@@ -423,9 +444,28 @@ export default function AiPlanAssistant({ plan }) {
             </div>
           ) : (
             <p className="mt-2 text-xs text-muted-soft">
-              Questions are hidden. Click Show to pick one.
+              Shortcuts are hidden. Click Show, or type a paraphrase below.
             </p>
           )}
+
+          <form onSubmit={submitDraft} className="mt-3 flex gap-2">
+            <input
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              disabled={!canChat}
+              className="min-w-0 flex-1 rounded-lg border border-line bg-canvas px-3 py-2 text-sm text-ink placeholder:text-muted/60 focus:border-accent focus:outline-none disabled:opacity-50"
+              placeholder="Or paraphrase an approved intent…"
+              type="text"
+              aria-label="Ask the plan assistant"
+            />
+            <button
+              type="submit"
+              disabled={!canChat || !draft.trim()}
+              className="rounded-lg border border-[#7d931d] bg-[#9aae37] px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#7e941e] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Ask
+            </button>
+          </form>
         </div>
       ) : null}
     </section>

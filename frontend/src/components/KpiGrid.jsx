@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { formatEuro, formatNumber, formatPct, formatTonnes, Icon, Metric } from "../utils/format.jsx";
 import OverviewCharts from "./OverviewCharts.jsx";
 
@@ -11,6 +12,102 @@ function KpiCard({ children, className = "" }) {
   );
 }
 
+function DecisionBridge({ plan }) {
+  const atRisk = useMemo(
+    () =>
+      (plan?.commercial_view || []).filter(
+        (row) => row.status === "PARTIAL" || row.status === "UNSERVED",
+      ),
+    [plan],
+  );
+  const shortFarms = useMemo(
+    () =>
+      [...(plan?.production_view || [])]
+        .filter((row) => (row.variance_t ?? 0) < -1e-9)
+        .sort((a, b) => a.variance_t - b.variance_t)
+        .slice(0, 3),
+    [plan],
+  );
+  const ledger = plan?.traceability_ledger || [];
+
+  if (!plan?.kpis || (!atRisk.length && !shortFarms.length)) return null;
+
+  return (
+    <div className="arch-card rounded-xl p-5">
+      <div className="flex flex-wrap items-center gap-2">
+        <Icon name="hub" className="text-[20px] text-[#546500]" />
+        <h2 className="font-display text-lg font-bold text-ink">
+          Production ↔ Commercial link
+        </h2>
+      </div>
+      <p className="mt-1 text-sm text-muted-soft">
+        How farm shortfalls relate to clients still waiting for fruit.
+      </p>
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <div>
+          <div className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted">
+            Biggest farm shortfalls
+          </div>
+          <ul className="mt-2 space-y-1.5 text-sm text-ink">
+            {shortFarms.length === 0 ? (
+              <li className="text-muted-soft">No farms are short of expected volume.</li>
+            ) : (
+              shortFarms.map((row) => (
+                <li key={row.farm_id} className="flex justify-between gap-2">
+                  <span>
+                    <span className="font-mono font-semibold">{row.farm_id}</span>{" "}
+                    {row.farm_name || ""}
+                  </span>
+                  <span className="font-mono text-[12px] font-semibold text-[#991b1b]">
+                    {formatNumber(row.variance_t)} t
+                  </span>
+                </li>
+              ))
+            )}
+          </ul>
+        </div>
+        <div>
+          <div className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted">
+            At-risk clients
+          </div>
+          <ul className="mt-2 space-y-1.5 text-sm text-ink">
+            {atRisk.length === 0 ? (
+              <li className="text-muted-soft">Every client is fully served.</li>
+            ) : (
+              atRisk.map((row) => {
+                const sources = [
+                  ...new Set(
+                    ledger
+                      .filter((entry) => entry.client_id === row.client_id)
+                      .map((entry) => `${entry.farm_id}:${entry.segment}`),
+                  ),
+                ].slice(0, 3);
+                return (
+                  <li key={row.client_id}>
+                    <div className="flex justify-between gap-2">
+                      <span>
+                        <span className="font-mono font-semibold">{row.client_id}</span>{" "}
+                        needs {row.requested_segment} · short{" "}
+                        {formatTonnes(row.remaining_t ?? row.demand - row.allocated_t)}
+                      </span>
+                      <span className="font-mono text-[11px] text-muted">{row.status}</span>
+                    </div>
+                    <div className="mt-0.5 font-mono text-[11px] text-muted">
+                      {sources.length
+                        ? `Fed by ${sources.join(", ")}`
+                        : "No compatible export allocated yet"}
+                    </div>
+                  </li>
+                );
+              })
+            )}
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function KpiGrid({ plan, updatedAt }) {
   const kpis = plan?.kpis;
   const empty = !kpis;
@@ -20,11 +117,8 @@ export default function KpiGrid({ plan, updatedAt }) {
   const saturation = capacity > 0 ? (exported / capacity) * 100 : 0;
   const stationFull = exported >= capacity - 1e-9;
   const totalValue =
+    kpis?.total_value_eur ??
     (kpis?.total_export_revenue_eur ?? 0) + (kpis?.total_local_revenue_eur ?? 0);
-  const avgPerKg =
-    (kpis?.total_actual_received_t ?? 0) > 0
-      ? totalValue / (kpis.total_actual_received_t * 1000)
-      : 0;
 
   return (
     <section className="flex h-full min-h-0 flex-col gap-5">
@@ -40,7 +134,7 @@ export default function KpiGrid({ plan, updatedAt }) {
             </span>
           </div>
           <p className="mt-1 text-sm text-muted-soft">
-            Farm intake thresholds and realization telemetry
+            Planned versus actual, station use, export value and local residual
           </p>
         </div>
         <div className="flex items-center gap-2 font-mono text-xs text-muted">
@@ -54,11 +148,36 @@ export default function KpiGrid({ plan, updatedAt }) {
       </div>
 
       <div className="view-scroll flex min-h-0 flex-col gap-4">
-        <div className="grid grid-cols-1 content-start gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+        <div className="grid grid-cols-1 content-start gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-3">
           <KpiCard>
             <div className="flex items-start justify-between gap-2">
               <span className="font-mono text-[11px] uppercase tracking-wider text-muted">
-                Export Capacity
+                Planned vs actual
+              </span>
+              <span className="rounded-sm border border-line bg-canvas px-2 py-0.5 font-mono text-[11px] font-semibold text-ink">
+                {empty ? "—" : `${kpis.farm_count} farms`}
+              </span>
+            </div>
+            <div className="mt-4">
+              <Metric tone="deep" size="xl">
+                {empty
+                  ? "— / —"
+                  : `${formatNumber(kpis.total_expected_t, 0)} / ${formatNumber(kpis.total_actual_received_t, 0)}`}
+              </Metric>
+              <div className="mt-1 text-sm font-medium text-muted">expected / actual tonnes</div>
+            </div>
+            <div className="mt-4 border-t border-canvas pt-3 font-mono text-[12px] text-muted">
+              Gap{" "}
+              {empty
+                ? "—"
+                : `${formatNumber((kpis.total_actual_received_t || 0) - (kpis.total_expected_t || 0))} t`}
+            </div>
+          </KpiCard>
+
+          <KpiCard>
+            <div className="flex items-start justify-between gap-2">
+              <span className="font-mono text-[11px] uppercase tracking-wider text-muted">
+                Export capacity
               </span>
               <span className="rounded-sm border border-[#9aae37]/40 bg-chip-bg px-2 py-0.5 font-mono text-[11px] font-semibold text-[#3f6b00]">
                 {empty ? "—" : `${formatNumber(saturation, 0)}%`}
@@ -70,7 +189,7 @@ export default function KpiGrid({ plan, updatedAt }) {
                   ? "— / —"
                   : `${formatNumber(exported, 0)} / ${formatNumber(capacity, 0)}`}
               </Metric>
-              <div className="mt-1 text-sm font-medium text-muted">tonnes</div>
+              <div className="mt-1 text-sm font-medium text-muted">exported / station limit</div>
               <div className="mt-3 h-2.5 w-full overflow-hidden rounded-full border border-line bg-canvas">
                 <div
                   className={`h-full rounded-full transition-all ${
@@ -83,10 +202,10 @@ export default function KpiGrid({ plan, updatedAt }) {
             <div className="mt-4 border-t border-canvas pt-3 font-mono text-[12px]">
               {empty ? (
                 <span className="text-muted">Station conditioning limit</span>
-              ) : stationFull ? (
-                <span className="font-semibold text-[#991b1b]">Station limit reached</span>
               ) : (
-                <span className="text-[#3f6b00]">Capacity remaining</span>
+                <span className={stationFull ? "font-semibold text-[#991b1b]" : "text-[#3f6b00]"}>
+                  Export rate {formatPct(kpis.export_rate_pct, 1)} of intake
+                </span>
               )}
             </div>
           </KpiCard>
@@ -94,29 +213,30 @@ export default function KpiGrid({ plan, updatedAt }) {
           <KpiCard>
             <div className="flex items-start justify-between gap-2">
               <span className="font-mono text-[11px] uppercase tracking-wider text-muted">
-                Export Rate
+                Export revenue
               </span>
-              <span className="flex items-center gap-0.5 rounded-sm bg-chip-bg px-1.5 py-0.5 font-mono text-[11px] font-semibold text-[#3f6b00]">
-                <Icon name="trending_up" className="text-[14px]" />
-                of supply
+              <span className="rounded-sm border border-line bg-canvas px-1.5 py-0.5 font-mono text-[11px] text-ink">
+                EUR
               </span>
             </div>
             <div className="mt-4">
               <Metric tone="accent" size="xl">
-                {empty ? "—" : formatPct(kpis.export_rate_pct, 1)}
+                {empty ? "—" : formatEuro(kpis.total_export_revenue_eur)}
               </Metric>
-              <div className="mt-2 text-sm text-muted-soft">Of total actual supply</div>
+              <div className="mt-2 text-sm text-muted-soft">From allocated export tonnes</div>
             </div>
-            <div className="mt-4 flex items-center gap-2 border-t border-canvas pt-3 font-mono text-[12px] text-muted">
-              <Icon name="verified" className="text-[16px] text-[#546500]" />
-              Intake {empty ? "—" : formatTonnes(kpis.total_actual_received_t)}
+            <div className="mt-4 flex items-center justify-between border-t border-canvas pt-3 font-mono text-[12px] text-muted">
+              <span>At-risk clients</span>
+              <span className="metric-number text-[14px] font-semibold text-ink">
+                {empty ? "—" : kpis.at_risk_client_count ?? 0}
+              </span>
             </div>
           </KpiCard>
 
           <KpiCard>
             <div className="flex items-start justify-between gap-2">
               <span className="font-mono text-[11px] uppercase tracking-wider text-muted">
-                Total Value
+                Total value
               </span>
               <span className="rounded-sm border border-line bg-canvas px-1.5 py-0.5 font-mono text-[11px] text-ink">
                 EUR
@@ -126,45 +246,46 @@ export default function KpiGrid({ plan, updatedAt }) {
               <Metric tone="deep" size="xl">
                 {empty ? "—" : formatEuro(totalValue)}
               </Metric>
-              <div className="mt-2 text-sm text-muted-soft">
-                Export + local revenue combined
-              </div>
+              <div className="mt-2 text-sm text-muted-soft">Export + local combined</div>
             </div>
-            <div className="mt-4 flex items-center justify-between border-t border-canvas pt-3 font-mono text-[12px] text-muted">
-              <span>Avg realization</span>
-              <span className="metric-number text-[14px] font-semibold text-ink">
-                {empty ? "—" : `€${avgPerKg.toFixed(3)} / kg`}
-              </span>
+            <div className="mt-4 border-t border-canvas pt-3 font-mono text-[12px] text-muted">
+              Local {empty ? "—" : formatEuro(kpis.total_local_revenue_eur)}
             </div>
           </KpiCard>
 
-          <div className="relative flex min-h-[168px] flex-col justify-between overflow-hidden rounded-xl border border-[#f59e0b]/45 bg-[#fffdf5] p-5 transition-all sm:col-span-2 xl:col-span-1">
+          <div className="relative flex min-h-[168px] flex-col justify-between overflow-hidden rounded-xl border border-[#f59e0b]/45 bg-[#fffdf5] p-5 transition-all sm:col-span-2 xl:col-span-2">
             <div className="pointer-events-none absolute -right-4 -top-4 h-16 w-16 rounded-full bg-[#fef3c7]/70" />
             <div className="relative z-10 flex items-start justify-between gap-2">
               <span className="font-mono text-[11px] uppercase tracking-wider text-warn-accent">
-                Local Volume
+                Local volume
               </span>
               <span className="flex items-center gap-1 rounded-sm border border-[#f59e0b]/40 bg-warn-bg px-2 py-0.5 font-mono text-[11px] font-bold text-warn-ink">
                 <Icon name="warning" className="text-[13px] text-warn-accent" />
                 Spillover
               </span>
             </div>
-            <div className="relative z-10 mt-4">
-              <Metric tone="warn" size="xl">
-                {empty ? "—" : formatNumber(kpis.total_local_residual_t, 0)}
-              </Metric>
-              <div className="mt-1 text-sm font-medium text-warn-accent">tonnes residual</div>
-              <div className="mt-2 metric-number text-[16px] font-semibold text-warn-ink">
-                {empty ? "—" : formatEuro(kpis.total_local_revenue_eur)} impact
+            <div className="relative z-10 mt-4 flex flex-wrap items-end gap-8">
+              <div>
+                <Metric tone="warn" size="xl">
+                  {empty ? "—" : formatNumber(kpis.total_local_residual_t, 0)}
+                </Metric>
+                <div className="mt-1 text-sm font-medium text-warn-accent">tonnes residual</div>
+              </div>
+              <div>
+                <div className="metric-number text-[22px] font-semibold text-warn-ink">
+                  {empty ? "—" : formatEuro(kpis.total_local_revenue_eur)}
+                </div>
+                <div className="mt-1 text-sm text-warn-ink/80">local market value</div>
               </div>
             </div>
             <div className="relative z-10 mt-4 flex items-center gap-1 border-t border-[#fef3c7] pt-3 font-mono text-[12px] text-warn-ink">
               <Icon name="priority_high" className="text-[15px]" />
-              Unallocated after export fill
+              Unallocated after export fill — steep discount versus export prices
             </div>
           </div>
         </div>
 
+        <DecisionBridge plan={plan} />
         <OverviewCharts plan={plan} />
       </div>
     </section>
