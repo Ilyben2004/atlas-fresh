@@ -1,12 +1,23 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { askPlanAssistant, getChatStatus } from "../api/plan";
 import { formatEuro, formatNumber, formatTonnes, Icon } from "../utils/format.jsx";
 
 export const INTENT_PROMPTS = [
-  "Which clients are at risk and why?",
-  "Which farm/segment gaps matter most today?",
-  "Why is fruit going local and what is its estimated value?",
+  {
+    tool: "get_clients_at_risk",
+    question: "Which clients are at risk and why?",
+  },
+  {
+    tool: "get_farm_segment_gaps",
+    question: "Which farm/segment gaps matter most today?",
+  },
+  {
+    tool: "get_local_residual_value",
+    question: "Why is fruit going local and what is its estimated value?",
+  },
 ];
+
+const SHORTCUTS_STORAGE_KEY = "atlas_fresh_assistant_shortcuts_open";
 
 function friendlyToolLabel(tool) {
   const labels = {
@@ -31,8 +42,6 @@ function AssistantMessageBody({ text }) {
     .map((line) => line.trim())
     .filter(Boolean);
 
-  // Merge wrapped continuation lines into the previous list item so multi-line
-  // LLM answers still render as one bullet per client/farm.
   const lines = [];
   for (const line of rawLines) {
     const isListItem = /^\d+[\).:-]\s+/.test(line) || /^[-•]\s+/.test(line);
@@ -59,11 +68,11 @@ function AssistantMessageBody({ text }) {
 
     if (allItemsAreList) {
       return (
-        <div className="space-y-2 text-[15px] leading-relaxed text-[#3d4806]">
+        <div className="space-y-2 text-[15px] leading-relaxed text-ink">
           {intro.map((line, index) => (
             <p key={`intro-${index}`}>{line}</p>
           ))}
-          <ol className="list-decimal space-y-2.5 pl-5">
+          <ol className="list-decimal space-y-2.5 pl-5 marker:font-semibold marker:text-[#546500]">
             {items.map((line, index) => (
               <li key={`item-${index}`} className="pl-1">
                 {line.replace(/^\d+[\).:-]\s+/, "").replace(/^[-•]\s+/, "")}
@@ -76,10 +85,35 @@ function AssistantMessageBody({ text }) {
   }
 
   return (
-    <div className="space-y-2 whitespace-pre-wrap text-[15px] leading-relaxed text-[#3d4806]">
+    <div className="whitespace-pre-wrap text-[15px] leading-relaxed text-ink">
       {cleaned}
     </div>
   );
+}
+
+function ModeBadge({ mode }) {
+  if (mode === "no_key") {
+    return (
+      <span className="rounded-sm border border-[#f59e0b]/45 bg-[#fef3c7] px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wide text-[#654a09]">
+        No API key
+      </span>
+    );
+  }
+  if (mode === "ready") {
+    return (
+      <span className="rounded-sm border border-[#9aae37]/45 bg-chip-bg px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wide text-[#3f6b00]">
+        Ready
+      </span>
+    );
+  }
+  if (mode === "offline") {
+    return (
+      <span className="rounded-sm border border-[#ef4444]/35 bg-[#fee2e2] px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wide text-[#991b1b]">
+        Offline
+      </span>
+    );
+  }
+  return null;
 }
 
 function buildDeterministicSummary(plan) {
@@ -126,14 +160,26 @@ function buildDeterministicSummary(plan) {
   return lines.join(" ");
 }
 
+function readShortcutsOpen() {
+  try {
+    const raw = localStorage.getItem(SHORTCUTS_STORAGE_KEY);
+    if (raw === null) return true;
+    return raw === "1" || raw === "true";
+  } catch {
+    return true;
+  }
+}
+
 export default function AiPlanAssistant({ plan }) {
-  const [mode, setMode] = useState("loading"); // loading | ready | no_key | offline
+  const [mode, setMode] = useState("loading");
   const [messages, setMessages] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  const [draft, setDraft] = useState("");
+  const [shortcutsOpen, setShortcutsOpen] = useState(readShortcutsOpen);
+  const bottomRef = useRef(null);
 
   const deterministicSummary = useMemo(() => buildDeterministicSummary(plan), [plan]);
+  const canChat = Boolean(plan) && !busy;
 
   useEffect(() => {
     let cancelled = false;
@@ -150,16 +196,29 @@ export default function AiPlanAssistant({ plan }) {
     };
   }, []);
 
-  async function handleAsk(question) {
-    const cleaned = (question || "").trim();
-    if (!plan || busy || !cleaned) return;
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages, busy, error]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SHORTCUTS_STORAGE_KEY, shortcutsOpen ? "1" : "0");
+    } catch {
+      /* ignore quota / private mode */
+    }
+  }, [shortcutsOpen]);
+
+  async function handleAsk(intent) {
+    const question = (intent?.question || "").trim();
+    const tool = (intent?.tool || "").trim();
+    if (!plan || busy || !question || !tool) return;
 
     setBusy(true);
     setError(null);
-    setMessages((current) => [...current, { role: "user", text: cleaned }]);
+    setMessages((current) => [...current, { role: "user", text: question }]);
 
     try {
-      const payload = await askPlanAssistant(cleaned, plan);
+      const payload = await askPlanAssistant(question, plan, tool);
       if (payload.status === "no_key") {
         setMode("no_key");
         setMessages((current) => current.slice(0, -1));
@@ -170,14 +229,14 @@ export default function AiPlanAssistant({ plan }) {
         {
           role: "assistant",
           text: payload.answer || "No answer returned.",
-          tool: payload.tool || null,
+          tool: payload.tool || tool,
         },
       ]);
     } catch (err) {
       const message = err.message || "Assistant request failed";
       setError(message);
       const isRejected =
-        /not allowed/i.test(message) || /approved/i.test(message) || /400/.test(message);
+        /not allowed|invalid tool/i.test(message) || /400/.test(message);
       const isUnavailable =
         /timed out|unavailable|503|provider/i.test(message) && !isRejected;
       setMessages((current) => [
@@ -196,45 +255,40 @@ export default function AiPlanAssistant({ plan }) {
     }
   }
 
-  function submitDraft(event) {
-    event.preventDefault();
-    const question = draft.trim();
-    if (!question) return;
-    setDraft("");
-    handleAsk(question);
+  function clearChat() {
+    setMessages([]);
+    setError(null);
   }
 
   return (
-    <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#eaf1ac] bg-white">
-      <div className="shrink-0 border-b border-[#eaf1ac] px-4 py-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <Icon name="smart_toy" className="text-[22px] text-[#546500]" />
-          <h2 className="font-display text-xl font-bold text-[#3d4806]">
-            AI Plan Assistant
-          </h2>
-          {mode === "no_key" ? (
-            <span className="rounded-sm border border-[#f59e0b]/45 bg-[#fef3c7] px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wide text-[#654a09]">
-              No API Key - Deterministic Mode
-            </span>
-          ) : null}
-          {mode === "ready" ? (
-            <span className="rounded-sm border border-[#9aae37]/45 bg-[#f2f7d2] px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wide text-[#3d4806]">
-              Ready
-            </span>
-          ) : null}
-          {mode === "offline" ? (
-            <span className="rounded-sm border border-[#ef4444]/35 bg-[#fee2e2] px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wide text-[#991b1b]">
-              Backend Offline
-            </span>
+    <section className="arch-card flex h-full min-h-0 flex-col overflow-hidden rounded-xl">
+      <div className="shrink-0 border-b border-line bg-white px-4 py-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <Icon name="smart_toy" className="text-[22px] text-[#546500]" />
+              <h2 className="font-display text-xl font-bold text-ink">AI Plan Assistant</h2>
+              <ModeBadge mode={mode} />
+            </div>
+            <p className="mt-1 text-sm text-muted-soft">
+              Choose one of the three approved questions. Free typing is disabled.
+            </p>
+          </div>
+          {mode === "ready" && messages.length > 0 ? (
+            <button
+              type="button"
+              onClick={clearChat}
+              disabled={busy}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-canvas px-2.5 py-1.5 text-xs font-semibold text-ink transition-colors hover:border-[#9aae37]/60 hover:bg-chip-bg disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Icon name="refresh" className="text-[16px] text-[#546500]" />
+              Clear chat
+            </button>
           ) : null}
         </div>
-        <p className="mt-1 text-sm text-[#454837]">
-          Ask about clients at risk, farm shortfalls, or fruit going local. Other topics are
-          declined.
-        </p>
       </div>
 
-      <div className="view-scroll min-h-0 flex-1 px-4 py-4">
+      <div className="view-scroll min-h-0 flex-1 bg-[linear-gradient(180deg,#fafbf4_0%,#ffffff_48%)] px-4 py-4">
         {mode === "loading" ? (
           <div className="flex h-full items-center justify-center gap-2 text-sm text-[#6d7208]">
             <span className="h-4 w-4 animate-spin rounded-full border-2 border-[#9aae37] border-t-transparent" />
@@ -243,110 +297,135 @@ export default function AiPlanAssistant({ plan }) {
         ) : null}
 
         {mode === "no_key" ? (
-          <div className="rounded-lg border border-[#eaf1ac] bg-[#fafbf4] p-4">
-            <div className="font-display text-base font-semibold text-[#3d4806]">
+          <div className="rounded-xl border border-line bg-white p-5 shadow-[0_1px_0_rgba(61,72,6,0.04)]">
+            <div className="font-display text-base font-semibold text-ink">
               Deterministic KPI summary
             </div>
-            <p className="mt-3 text-sm leading-relaxed text-[#3d4806]">
-              {deterministicSummary}
-            </p>
+            <p className="mt-3 text-sm leading-relaxed text-ink">{deterministicSummary}</p>
             <p className="mt-4 font-mono text-[11px] text-[#6d7208]">
-              Set GEMINI_API_KEY on the backend to enable tool-calling answers.
+              Set GEMINI_API_KEY on the backend to enable live answers.
             </p>
           </div>
         ) : null}
 
         {mode === "offline" ? (
-          <div className="rounded-lg border border-[#ef4444]/30 bg-[#fee2e2] p-4 text-sm text-[#991b1b]">
-            Cannot reach `/api/v1/chat/status`. Start the backend to use the assistant.
+          <div className="rounded-xl border border-[#ef4444]/30 bg-[#fee2e2] p-4 text-sm text-[#991b1b]">
+            Cannot reach the assistant. Start the backend and try again.
           </div>
         ) : null}
 
         {mode === "ready" ? (
-          <div className="flex flex-col gap-3">
+          <div className="mx-auto flex w-full max-w-3xl flex-col gap-3">
             {messages.length === 0 ? (
-              <div className="rounded-lg border border-[#eaf1ac] bg-[#fafbf4] p-4 text-sm text-[#454837]">
-                Use a shortcut below or type a paraphrase. Off-topic questions are rejected.
+              <div className="rounded-xl border border-dashed border-[#9aae37]/45 bg-white/80 px-5 py-8 text-center">
+                <Icon name="chat" className="mx-auto text-[28px] text-[#7e941e]" />
+                <p className="mt-3 font-display text-lg font-semibold text-ink">
+                  Choose a question below
+                </p>
+                <p className="mt-1 text-sm text-muted-soft">
+                  Only the three approved questions can be asked.
+                </p>
               </div>
             ) : null}
 
-            {messages.map((message, index) => (
-              <div
-                key={`${message.role}-${index}`}
-                className={`rounded-lg border px-3 py-3 text-sm leading-relaxed ${
-                  message.role === "user"
-                    ? "ml-6 border-[#9aae37]/40 bg-[#f2f7d2] text-[#3d4806]"
-                    : "mr-6 border-[#eaf1ac] bg-white text-[#3d4806]"
-                }`}
-              >
-                <div className="mb-2 flex flex-wrap items-center gap-2 font-mono text-[10px] font-semibold uppercase tracking-wider text-[#6d7208]">
-                  <span>{message.role === "user" ? "You" : "Atlas Fresh AI"}</span>
-                  {message.role === "assistant" && friendlyToolLabel(message.tool) ? (
-                    <span className="rounded-sm border border-[#eaf1ac] bg-[#fafbf4] px-1.5 py-0.5 normal-case tracking-normal">
-                      {friendlyToolLabel(message.tool)}
-                    </span>
-                  ) : null}
+            {messages.map((message, index) => {
+              const isUser = message.role === "user";
+              return (
+                <div
+                  key={`${message.role}-${index}`}
+                  className={`flex ${isUser ? "justify-end" : "justify-start"}`}
+                >
+                  <div
+                    className={`max-w-[92%] rounded-2xl border px-3.5 py-3 sm:max-w-[85%] ${
+                      isUser
+                        ? "rounded-br-md border-[#9aae37]/45 bg-[#f2f7d2] text-ink"
+                        : "rounded-bl-md border-line bg-white text-ink shadow-[0_1px_0_rgba(61,72,6,0.04)]"
+                    }`}
+                  >
+                    <div className="mb-1.5 flex flex-wrap items-center gap-2 font-mono text-[10px] font-semibold uppercase tracking-wider text-[#6d7208]">
+                      <span>{isUser ? "You" : "Atlas Fresh AI"}</span>
+                      {!isUser && friendlyToolLabel(message.tool) ? (
+                        <span className="rounded-sm border border-line bg-canvas px-1.5 py-0.5 normal-case tracking-normal text-[#3f6b00]">
+                          {friendlyToolLabel(message.tool)}
+                        </span>
+                      ) : null}
+                    </div>
+                    {isUser ? (
+                      <div className="text-[15px] leading-relaxed">{message.text}</div>
+                    ) : (
+                      <AssistantMessageBody text={message.text} />
+                    )}
+                  </div>
                 </div>
-                {message.role === "assistant" ? (
-                  <AssistantMessageBody text={message.text} />
-                ) : (
-                  <div className="text-[15px] leading-relaxed">{message.text}</div>
-                )}
-              </div>
-            ))}
+              );
+            })}
 
             {busy ? (
-              <div className="mr-6 flex items-center gap-2 rounded-lg border border-[#eaf1ac] bg-white px-3 py-3 text-sm text-[#6d7208]">
-                <span className="h-4 w-4 animate-spin rounded-full border-2 border-[#9aae37] border-t-transparent" />
-                Looking up today’s plan…
+              <div className="flex justify-start">
+                <div className="inline-flex items-center gap-2 rounded-2xl rounded-bl-md border border-line bg-white px-3.5 py-3 text-sm text-[#6d7208]">
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-[#9aae37] border-t-transparent" />
+                  Looking up today’s plan…
+                </div>
               </div>
             ) : null}
 
             {error ? (
-              <div className="rounded-lg border border-[#ef4444]/35 bg-[#fee2e2] px-3 py-2 text-sm text-[#991b1b]">
+              <div className="rounded-xl border border-[#ef4444]/35 bg-[#fee2e2] px-3 py-2 text-sm text-[#991b1b]">
                 {error}
               </div>
             ) : null}
+
+            <div ref={bottomRef} />
           </div>
         ) : null}
       </div>
 
       {mode === "ready" ? (
-        <div className="shrink-0 border-t border-[#eaf1ac] bg-white p-4">
-          <div className="mb-2 font-mono text-[10px] font-semibold uppercase tracking-wider text-[#6d7208]">
-            Intent shortcuts
-          </div>
-          <div className="flex flex-col gap-2">
-            {INTENT_PROMPTS.map((question) => (
-              <button
-                key={question}
-                type="button"
-                disabled={!plan || busy}
-                onClick={() => handleAsk(question)}
-                className="rounded-lg border border-[#7d931d] bg-[#9aae37] px-3 py-2.5 text-left text-sm font-semibold text-white transition-colors hover:bg-[#7e941e] disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {question}
-              </button>
-            ))}
-          </div>
+        <div className="shrink-0 border-t border-line bg-white px-4 py-3">
+          <button
+            type="button"
+            onClick={() => setShortcutsOpen((open) => !open)}
+            aria-expanded={shortcutsOpen}
+            className="flex w-full items-center justify-between gap-3 text-left"
+          >
+            <span className="inline-flex items-center gap-2 font-mono text-[10px] font-semibold uppercase tracking-wider text-[#6d7208]">
+              <Icon
+                name={shortcutsOpen ? "expand_less" : "expand_more"}
+                className="text-[18px] text-[#546500]"
+              />
+              Approved questions
+              <span className="rounded-sm border border-line bg-canvas px-1.5 py-0.5 normal-case tracking-normal text-[#3f6b00]">
+                {INTENT_PROMPTS.length}
+              </span>
+            </span>
+            <span className="text-xs font-semibold text-[#546500]">
+              {shortcutsOpen ? "Hide" : "Show"}
+            </span>
+          </button>
 
-          <form onSubmit={submitDraft} className="mt-3 flex gap-2">
-            <input
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              disabled={!plan || busy}
-              className="min-w-0 flex-1 rounded-lg border border-[#eaf1ac] bg-white px-3 py-2 text-sm text-[#3d4806] placeholder:text-[#6d7208]/60 focus:border-[#9aae37] focus:outline-none"
-              placeholder="Or paraphrase an approved intent…"
-              type="text"
-            />
-            <button
-              type="submit"
-              disabled={!plan || busy || !draft.trim()}
-              className="rounded-lg border border-[#7d931d] bg-[#9aae37] px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#7e941e] disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              Ask
-            </button>
-          </form>
+          {shortcutsOpen ? (
+            <div className="mt-2.5 flex flex-col gap-2">
+              {INTENT_PROMPTS.map((intent) => (
+                <button
+                  key={intent.tool}
+                  type="button"
+                  disabled={!canChat}
+                  onClick={() => handleAsk(intent)}
+                  className="group flex items-start gap-2 rounded-xl border border-line bg-white px-3 py-2.5 text-left text-sm font-medium text-ink transition-colors hover:border-[#9aae37]/70 hover:bg-chip-bg disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Icon
+                    name="arrow_forward"
+                    className="mt-0.5 shrink-0 text-[16px] text-[#7e941e] transition-transform group-hover:translate-x-0.5"
+                  />
+                  <span>{intent.question}</span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-2 text-xs text-muted-soft">
+              Questions are hidden. Click Show to pick one.
+            </p>
+          )}
         </div>
       ) : null}
     </section>

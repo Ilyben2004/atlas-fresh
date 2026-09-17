@@ -33,6 +33,11 @@ SHORTAGE_LABELS = {
     ),
 }
 
+ACCEPTANCE_LABELS = {
+    "EXACT": "exact quality only",
+    "MINIMUM": "minimum quality or better",
+}
+
 
 def _plain_status(status: object) -> str:
     key = str(status or "").upper()
@@ -44,6 +49,11 @@ def _plain_shortage(reason: object) -> str | None:
         return None
     key = str(reason).upper()
     return SHORTAGE_LABELS.get(key, str(reason).replace("_", " ").lower())
+
+
+def _plain_acceptance(mode: object) -> str:
+    key = str(mode or "").upper()
+    return ACCEPTANCE_LABELS.get(key, key.replace("_", " ").lower() or "unspecified")
 
 
 def get_clients_at_risk(context: dict[str, Any]) -> dict[str, Any]:
@@ -62,6 +72,7 @@ def get_clients_at_risk(context: dict[str, Any]) -> dict[str, Any]:
                 "client_id": row.get("client_id"),
                 "client_name": row.get("client_name"),
                 "requested_quality": row.get("requested_segment"),
+                "quality_rule": _plain_acceptance(row.get("acceptance_mode")),
                 "wanted_tonnes": demand,
                 "received_tonnes": allocated,
                 "still_needed_tonnes": shortfall,
@@ -77,17 +88,25 @@ def get_clients_at_risk(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_farm_segment_gaps(context: dict[str, Any]) -> dict[str, Any]:
-    """Return the largest farm shortages and their segment actuals."""
+def get_farm_segment_gaps(
+    context: dict[str, Any],
+    *,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Return farm shortages and their segment actuals (all by default)."""
     production = list(context.get("production_view") or [])
     shortages = [
         row for row in production if float(row.get("variance_t") or 0) < -1e-9
     ]
     shortages.sort(key=lambda row: float(row.get("variance_t") or 0))
-    top = shortages[:5]
+
+    if limit is not None and limit > 0:
+        selected = shortages[:limit]
+    else:
+        selected = shortages
 
     farms: list[dict[str, Any]] = []
-    for row in top:
+    for row in selected:
         expected = float(row.get("expected_daily_capacity") or 0)
         actual = float(row.get("actual_delivered") or 0)
         gap = actual - expected
@@ -111,6 +130,8 @@ def get_farm_segment_gaps(context: dict[str, Any]) -> dict[str, Any]:
     return {
         "intent": "farm_segment_gaps",
         "shortage_farm_count": len(shortages),
+        "listed_count": len(farms),
+        "limit_applied": limit if limit is not None and limit > 0 else None,
         "top_shortages": farms,
     }
 
@@ -159,10 +180,29 @@ TOOL_HANDLERS = {
 }
 
 
-def run_tool(name: str, context: dict[str, Any]) -> dict[str, Any]:
+def _parse_limit(args: dict[str, Any] | None) -> int | None:
+    if not args:
+        return None
+    raw = args.get("limit")
+    if raw in (None, ""):
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def run_tool(
+    name: str,
+    context: dict[str, Any],
+    args: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     handler = TOOL_HANDLERS.get(name)
     if handler is None:
         raise ValueError(f"Unknown tool: {name}")
+    if name == "get_farm_segment_gaps":
+        return handler(context, limit=_parse_limit(args))
     return handler(context)
 
 
@@ -170,7 +210,7 @@ def gemini_tool_declarations() -> list[dict[str, Any]]:
     """Function declarations for Gemini toolConfig.
 
     Gemini rejects OBJECT schemas with empty properties, so each tool includes
-    a harmless optional string field even when no arguments are required.
+    at least one property even when no arguments are required.
     """
     optional_focus = {
         "type": "OBJECT",
@@ -181,6 +221,25 @@ def gemini_tool_declarations() -> list[dict[str, Any]]:
                     "Optional short focus note. Leave empty unless clarifying emphasis."
                 ),
             }
+        },
+    }
+    farm_gaps_params = {
+        "type": "OBJECT",
+        "properties": {
+            "limit": {
+                "type": "INTEGER",
+                "description": (
+                    "Optional. Max number of shortfall farms to return, biggest first. "
+                    "Set this when the user asks for a top N (e.g. 10). "
+                    "Omit to return ALL farms that are short today."
+                ),
+            },
+            "focus": {
+                "type": "STRING",
+                "description": (
+                    "Optional short focus note. Leave empty unless clarifying emphasis."
+                ),
+            },
         },
     }
     return [
@@ -198,9 +257,11 @@ def gemini_tool_declarations() -> list[dict[str, Any]]:
             "description": (
                 "Use when the user asks which farm or segment gaps, shortages, "
                 "production shortfalls, or supply variances matter most today. "
-                "Match paraphrases about orchard deficits or A/B/C/D gaps."
+                "Match paraphrases about orchard deficits or A/B/C/D gaps. "
+                "By default return every short farm. If the user asks for a top N "
+                "(e.g. 'give me 10 most shortfall farms'), set limit to that N."
             ),
-            "parameters": optional_focus,
+            "parameters": farm_gaps_params,
         },
         {
             "name": "get_local_residual_value",

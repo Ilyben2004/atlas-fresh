@@ -52,40 +52,7 @@ export default function KpiGrid({ plan, updatedAt }) {
         </div>
       </div>
 
-      <div className="view-scroll grid grid-cols-1 content-start gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
-        <KpiCard>
-          <div className="flex items-start justify-between gap-2">
-            <span className="font-mono text-[11px] uppercase tracking-wider text-muted">
-              Data Health
-            </span>
-            <span className="flex items-center gap-1 rounded-sm border border-[#9aae37]/30 bg-line px-2 py-0.5 font-mono text-[11px] font-semibold text-ink">
-              <Icon
-                name={empty ? "pending" : "check_circle"}
-                className="text-[13px] text-[#546500]"
-              />
-              {empty ? "Idle" : "Valid"}
-            </span>
-          </div>
-          <div className="mt-4">
-            <div className="flex items-center gap-2">
-              <Metric tone={empty ? "muted" : "good"} size="xl">
-                {empty ? "—" : "Valid"}
-              </Metric>
-              {!empty ? (
-                <span className="inline-block h-3 w-3 rounded-full bg-accent" />
-              ) : null}
-            </div>
-            <div className="mt-2 text-sm text-muted-soft">
-              {empty ? "No workbook loaded yet." : "Workbook loaded successfully."}
-            </div>
-          </div>
-          <div className="mt-4 border-t border-canvas pt-3 font-mono text-[12px] text-muted">
-            {empty
-              ? "Awaiting Farms · Clients · Station"
-              : `${kpis.farm_count} orchards · ${kpis.client_count} clients`}
-          </div>
-        </KpiCard>
-
+      <div className="view-scroll grid grid-cols-1 content-start gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
         <KpiCard>
           <div className="flex items-start justify-between gap-2">
             <span className="font-mono text-[11px] uppercase tracking-wider text-muted">

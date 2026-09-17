@@ -8,49 +8,41 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from chat_tools import (
-    ALLOWED_TOOL_NAMES,
-    REJECT_TOOL_NAME,
-    gemini_tool_declarations,
-    run_tool,
-)
-
-ROUTE_SYSTEM_PROMPT = """You are the Atlas Fresh Supply Chain AI router.
-You analyze daily apple allocation dashboards in read-only mode.
-
-You MUST call exactly one tool:
-- get_clients_at_risk
-- get_farm_segment_gaps
-- get_local_residual_value
-- reject_question
-
-Map paraphrases and different numbers to the matching intent tool.
-Examples:
-- "why are 55t going local?" → get_local_residual_value
-- "which clients were shorted?" → get_clients_at_risk
-- "biggest orchard shortages today?" → get_farm_segment_gaps
-- "write a poem" → reject_question
-
-Do not invent data. Do not answer in plain text on this turn — call a tool."""
+from chat_tools import ALLOWED_TOOL_NAMES, run_tool
 
 ANSWER_SYSTEM_PROMPT = """You are the Atlas Fresh Supply Chain AI writing for non-technical planners.
 
 Rules:
-- Read-only: do not invent numbers or IDs. Use only the tool result JSON.
-- Write in plain English a business user can understand in under 30 seconds.
-- Never show technical codes like PARTIAL, UNSERVED, INSUFFICIENT_COMPATIBLE_SEGMENT, STATION_CAPACITY_REACHED, variance_t, or snake_case field names.
-- Prefer the plain-language fields already in the tool result (service_level, plain_reason, short_by_tonnes, etc.).
-- For local residual: use station_is_full, exported_tonnes, and station_limit_tonnes to explain why fruit goes local.
-- Always mention real Client IDs / Farm IDs when present (for example C02, F13).
+- Read-only: use only the tool result JSON. Do not invent numbers or IDs.
+- Plain English only. Never show technical codes (PARTIAL, UNSERVED, INSUFFICIENT_COMPATIBLE_SEGMENT, STATION_CAPACITY_REACHED, variance_t, snake_case fields).
+- Consistency is mandatory: for the same tool result, every answer must include the same facts in the same order and shape. Do not add extra commentary, tips, or skip fields.
+- No markdown: no headings, no **, no backticks, no bullet characters other than the numbered list.
+- Follow the ANSWER CONTRACT for the active tool exactly. Fill every required slot; omit nothing that the contract asks for; add nothing the contract does not ask for.
 
-Required answer shape (plain text, not markdown tables):
-1) One short opening sentence with the headline.
-2) Then a simple numbered list, one item per client or farm.
-3) Each list item: Name (ID) — what happened — why, in everyday words.
-4) Optional one-line closing tip.
+ANSWER CONTRACT — get_clients_at_risk:
+Line 1: "<N> clients still need fruit today:" (or "1 client still needs fruit today:" / "Every client was fully served today." if empty).
+Then one numbered line per client, in the same order as the JSON, each exactly:
+"<n>. <client_name> (<client_id>) — <service_level>; wanted <wanted_tonnes> t, received <received_tonnes> t, still needs <still_needed_tonnes> t; quality <requested_quality> (<quality_rule>); because <plain_reason>."
+If plain_reason is missing, end with "because supply was not enough for this order."
+No closing tip. No extra sentences.
 
-Do not use markdown headings, bold markers like **, or code backticks.
-If the tool result is empty, say clearly that nothing is at risk / no gaps / no local volume today."""
+ANSWER CONTRACT — get_farm_segment_gaps:
+Line 1: If top_shortages is empty: "No farm delivered less than expected today."
+Else if limit_applied is null: "<shortage_farm_count> farms are short today, biggest shortfalls first:"
+Else: "Top <listed_count> farm shortfalls today (of <shortage_farm_count> farms short), biggest first:"
+Then one numbered line per farm in top_shortages (list every farm in that array; do not invent extra farms), each exactly:
+"<n>. <farm_name> (<farm_id>) — delivered <delivered_tonnes> t vs <expected_tonnes> t expected (short by <short_by_tonnes> t); quality delivered A <A> t, B <B> t, C <C> t, D <D> t; left unexported <left_unexported_tonnes> t."
+Use 0 when a quality grade is missing. No closing tip. No extra sentences.
+
+ANSWER CONTRACT — get_local_residual_value:
+Line 1: "About <tonnes_going_local> t is going to the local market today, worth roughly €<estimated_local_value_eur>."
+Line 2: If station_is_full is true: "The export station is full (<exported_tonnes> t of <station_limit_tonnes> t), so leftover fruit could not be exported."
+Else: "The export station is not full (<exported_tonnes> t of <station_limit_tonnes> t); leftover fruit remains after export allocations."
+If main_farms_sending_local is non-empty, then line "Main farms sending fruit local:" followed by numbered lines:
+"<n>. <farm_name> (<farm_id>) — <tonnes_going_local> t local."
+No closing tip. No extra sentences.
+
+Round tonnes sensibly for reading (whole numbers when close to whole). Keep euro amounts as whole euros with thousands separators when helpful."""
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 GEMINI_TIMEOUT_SECONDS = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "30"))
@@ -60,6 +52,7 @@ router = APIRouter(tags=["chat"])
 
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1)
+    tool: str = Field(min_length=1)
     context: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -93,30 +86,24 @@ def chat_status() -> ChatStatusResponse:
 @router.post("/chat", response_model=ChatResponse)
 async def chat(payload: ChatRequest) -> ChatResponse:
     question = payload.question.strip()
+    tool_name = payload.tool.strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
+    if tool_name not in ALLOWED_TOOL_NAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid tool. Choose one of: get_clients_at_risk, "
+                "get_farm_segment_gaps, get_local_residual_value."
+            ),
+        )
 
     api_key = _gemini_api_key()
     if not api_key:
         return ChatResponse(status="no_key", question=question, answer=None, tool=None)
 
     try:
-        tool_name, tool_args = await _route_with_tools(api_key=api_key, question=question)
-        if tool_name == REJECT_TOOL_NAME:
-            reason = str(tool_args.get("reason") or "Question is outside approved intents.")
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Question is not allowed. Ask about clients at risk, "
-                    f"farm/segment gaps, or local residual value. ({reason})"
-                ),
-            )
-        if tool_name not in ALLOWED_TOOL_NAMES:
-            raise HTTPException(
-                status_code=400,
-                detail="Question is not allowed. No approved analytical tool was selected.",
-            )
-
+        # Intent is chosen in the UI — skip Gemini tool-calling / routing.
         tool_result = run_tool(tool_name, payload.context)
         answer = await _answer_from_tool(
             api_key=api_key,
@@ -143,54 +130,6 @@ async def chat(payload: ChatRequest) -> ChatResponse:
     )
 
 
-async def _route_with_tools(*, api_key: str, question: str) -> tuple[str, dict[str, Any]]:
-    body = {
-        "system_instruction": {"parts": [{"text": ROUTE_SYSTEM_PROMPT}]},
-        "contents": [
-            {
-                "role": "user",
-                "parts": [
-                    {
-                        "text": (
-                            "Classify this user question into exactly one tool call.\n"
-                            f"Question: {question}"
-                        )
-                    }
-                ],
-            }
-        ],
-        "tools": [{"function_declarations": gemini_tool_declarations()}],
-        "toolConfig": {
-            "functionCallingConfig": {
-                "mode": "ANY",
-                "allowedFunctionNames": [
-                    "get_clients_at_risk",
-                    "get_farm_segment_gaps",
-                    "get_local_residual_value",
-                    "reject_question",
-                ],
-            }
-        },
-        "generationConfig": {
-            "temperature": 0.0,
-            "maxOutputTokens": 256,
-        },
-    }
-
-    data = await _gemini_post(api_key=api_key, body=body)
-    call = _extract_function_call(data)
-    if call is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Question is not allowed. The assistant could not route it to an approved tool.",
-        )
-    name = str(call.get("name") or "")
-    args = call.get("args") or {}
-    if not isinstance(args, dict):
-        args = {}
-    return name, args
-
-
 async def _answer_from_tool(
     *,
     api_key: str,
@@ -198,6 +137,7 @@ async def _answer_from_tool(
     tool_name: str,
     tool_result: dict[str, Any],
 ) -> str:
+    contract_name = tool_name
     body = {
         "system_instruction": {"parts": [{"text": ANSWER_SYSTEM_PROMPT}]},
         "contents": [
@@ -207,19 +147,20 @@ async def _answer_from_tool(
                     {
                         "text": (
                             f"User question:\n{question}\n\n"
-                            f"Tool used: {tool_name}\n\n"
+                            f"Active tool / contract: {contract_name}\n\n"
                             "Tool result JSON (authoritative — answer only from this):\n"
                             f"{json.dumps(tool_result, default=str)}\n\n"
-                            "Write the full answer now. Cover every client or farm in the "
-                            "tool result. Do not stop mid-sentence."
+                            f"Write the full answer using ONLY the ANSWER CONTRACT for "
+                            f"{contract_name}. Same facts, same order, every required field. "
+                            "Do not stop mid-sentence. Do not add tips or extra commentary."
                         )
                     }
                 ],
             }
         ],
         "generationConfig": {
-            "temperature": 0.2,
-            # Thinking tokens count against this budget on Gemini 3 — keep it roomy.
+            # Low temperature keeps wording/structure stable across repeats.
+            "temperature": 0.0,
             "maxOutputTokens": 4096,
             "thinkingConfig": {
                 "thinkingLevel": "minimal",
@@ -234,7 +175,6 @@ async def _answer_from_tool(
             f"Gemini returned an empty answer (finishReason={finish or 'unknown'})."
         )
     if finish == "MAX_TOKENS":
-        # Rare with 4096 + minimal thinking; surface clearly rather than a clipped reply.
         raise RuntimeError(
             "Gemini ran out of output tokens before finishing the answer. Try again."
         )
@@ -280,18 +220,6 @@ def _public_provider_error(exc: Exception) -> str:
         # Keep upstream reason visible (API key never included in Gemini bodies).
         return f"Gemini provider failed. {text}"
     return "Gemini provider failed. The assistant is temporarily unavailable."
-
-
-def _extract_function_call(data: dict[str, Any]) -> dict[str, Any] | None:
-    candidates = data.get("candidates") or []
-    if not candidates:
-        return None
-    parts = (candidates[0].get("content") or {}).get("parts") or []
-    for part in parts:
-        call = part.get("functionCall") or part.get("function_call")
-        if call and call.get("name"):
-            return call
-    return None
 
 
 def _finish_reason(data: dict[str, Any]) -> str:
